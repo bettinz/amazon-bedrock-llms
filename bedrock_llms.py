@@ -77,16 +77,26 @@ class NovaLLM(ChatBedrockConverse):
             except json.JSONDecodeError:
                 model_kwargs = {}
 
-        # Use additional_model_request_fields for extra parameters
+        # Get inference parameters from settings
+        temperature = kwargs.get("temperature", 0.7)
+        max_tokens = kwargs.get("max_tokens", 4096)
+        top_p = kwargs.get("top_p", 0.9)
+
+        # Build input kwargs for ChatBedrockConverse
         input_kwargs = {
             "model": model_id,
             "client": Boto3().get_client("bedrock-runtime"),
+            "temperature": float(temperature) if temperature is not None else None,
+            "max_tokens": int(max_tokens) if max_tokens is not None else None,
+            "top_p": float(top_p) if top_p is not None else None,
         }
 
         if model_kwargs:
             input_kwargs["additional_model_request_fields"] = model_kwargs
 
+        # Remove None values
         input_kwargs = {k: v for k, v in input_kwargs.items() if v is not None}
+
         super(NovaLLM, self).__init__(**input_kwargs)
 
         if kwargs.get("budget_mode", "Disabled") != "Disabled":
@@ -220,6 +230,24 @@ class NovaLLMConfig(LLMSettings):
             f"- Nova Pro: {NOVA_PRO_MODEL_ID}\n"
             f"- Nova Lite: {NOVA_LITE_MODEL_ID}"
         ),
+    )
+    temperature: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Controls randomness in responses. Lower values (e.g., 0.2) make output more focused and deterministic, higher values (e.g., 0.8) make it more creative. Range: 0.0 to 1.0",
+    )
+    max_tokens: int = Field(
+        default=4096,
+        ge=1,
+        le=100000,
+        description="Maximum number of tokens to generate in the response.",
+    )
+    top_p: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus sampling: only consider tokens with cumulative probability up to this value. Range: 0.0 to 1.0",
     )
     model_kwargs: Optional[str] = Field(
         default="{}",
