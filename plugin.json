@@ -1,10 +1,10 @@
 {
-    "name": "Amazon Nova LLM",
+    "name": "Amazon Bedrock LLMs",
     "version": "1.0.0",
     "description": "This plugin integrates Amazon Nova LLMs (Pro and Lite) into Cheshire Cat AI.",
     "author_name": "bettinz",
     "author_url": "https://github.com/bettinz",
-    "plugin_url": "https://github.com/bettinz/amazon-nova-llm.git",
+    "plugin_url": "https://github.com/bettinz/amazon-bedrock-llms.git",
     "tags": "AWS, Bedrock, Nova Pro, Nova Lite, LLM, integration",
-    "thumb": "https://raw.githubusercontent.com/bettinz/amazon-nova-llm/master/assets/logo2.png"
+    "thumb": "https://raw.githubusercontent.com/bettinz/amazon-bedrock-llms/master/assets/logo2.png"
 }

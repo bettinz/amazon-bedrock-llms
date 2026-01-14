@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage
 from langchain_aws import ChatBedrock
 import logging
 
-from cat.mad_hatter.decorators import tool, hook
+from cat.mad_hatter.decorators import tool, hook, plugin
 from cat.mad_hatter.mad_hatter import MadHatter
 from cat.factory.llm import LLMSettings
 from cat.plugins.aws_integration import Boto3
@@ -18,7 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PLUGIN_NAME = "amazon_nova_llm"
+# IMPORTANT: This must match the folder name of the plugin
+PLUGIN_NAME = "amazon_bedrock_llms"
 
 # Default Nova model IDs (with region prefix)
 # Use us. for US regions, eu. for EU regions
@@ -369,4 +370,17 @@ def get_current_model(data, cat):
 @hook
 def factory_allowed_llms(allowed, cat) -> List:
     return allowed + [NovaLLMConfig]
+
+
+@plugin
+def settings_model():
+    """Plugin settings schema - this makes settings visible in the plugin page."""
+    from pydantic import BaseModel
+
+    class NovaPluginSettings(BaseModel):
+        """Settings for Amazon Nova LLM plugin."""
+        pass
+
+    return NovaPluginSettings
+
 
