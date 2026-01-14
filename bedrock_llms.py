@@ -69,11 +69,18 @@ class NovaLLM(ChatBedrock):
         model_id = kwargs.get("model_id", DEFAULT_MODEL_ID)
         default_input_price, default_output_price = get_default_pricing(model_id)
 
+        # Parse model_kwargs if it's a string
+        model_kwargs = kwargs.get("model_kwargs", "{}")
+        if isinstance(model_kwargs, str):
+            try:
+                model_kwargs = json.loads(model_kwargs)
+            except json.JSONDecodeError:
+                model_kwargs = {}
+
         input_kwargs = {
             "model_id": model_id,
-            "provider": "amazon",
             "streaming": True,
-            "model_kwargs": json.loads(kwargs.get("model_kwargs", "{}")),
+            "model_kwargs": model_kwargs,
             "client": Boto3().get_client("bedrock-runtime"),
         }
 
