@@ -5,7 +5,7 @@ from typing import List, Optional, Type
 
 from pydantic import Field, ConfigDict
 from langchain_core.messages import AIMessage
-from langchain_aws import ChatBedrock
+from langchain_aws import ChatBedrockConverse
 import logging
 
 from cat.mad_hatter.decorators import tool, hook, plugin
@@ -62,8 +62,8 @@ def get_default_pricing(model_id: str):
     return NOVA_PRO_INPUT_PRICE, NOVA_PRO_OUTPUT_PRICE
 
 
-class NovaLLM(ChatBedrock):
-    """Custom ChatBedrock class for Amazon Nova models (Pro and Lite)."""
+class NovaLLM(ChatBedrockConverse):
+    """Custom ChatBedrockConverse class for Amazon Nova models (Pro and Lite)."""
 
     def __init__(self, **kwargs):
         model_id = kwargs.get("model_id", DEFAULT_MODEL_ID)
@@ -77,12 +77,14 @@ class NovaLLM(ChatBedrock):
             except json.JSONDecodeError:
                 model_kwargs = {}
 
+        # Use additional_model_request_fields for extra parameters
         input_kwargs = {
-            "model_id": model_id,
-            "streaming": True,
-            "model_kwargs": model_kwargs,
+            "model": model_id,
             "client": Boto3().get_client("bedrock-runtime"),
         }
+
+        if model_kwargs:
+            input_kwargs["additional_model_request_fields"] = model_kwargs
 
         input_kwargs = {k: v for k, v in input_kwargs.items() if v is not None}
         super(NovaLLM, self).__init__(**input_kwargs)
