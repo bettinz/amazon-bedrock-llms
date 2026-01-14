@@ -1,48 +1,85 @@
-# Amazon Bedrock LLMs
+# Amazon Nova LLM
 
 [![awesome plugin](https://custom-icon-badges.demolab.com/static/v1?label=&message=awesome+plugin&color=383938&style=for-the-badge&logo=cheshire_cat_ai)](https://)
 [![Awesome plugin](https://custom-icon-badges.demolab.com/static/v1?label=&message=Awesome+plugin&color=000000&style=for-the-badge&logo=cheshire_cat_ai)](https://)
 [![awesome plugin](https://custom-icon-badges.demolab.com/static/v1?label=&message=awesome+plugin&color=F4F4F5&style=for-the-badge&logo=cheshire_cat_black)](https://)
 
-This plugin integrates Amazon Bedrock LLMs (Language Models) into the Cheshire Cat AI framework, allowing users to leverage a variety of powerful language models provided by Amazon Web Services (AWS).
+This plugin integrates Amazon Nova LLMs (Pro and Lite) into the Cheshire Cat AI framework, allowing users to leverage AWS's powerful Nova foundation models.
 
 ## Key Features
 
-- Dynamic model selection: Automatically fetches and configures available Bedrock models.
-- Guardrail support: Implements AWS Bedrock guardrails for enhanced security and compliance.
-- Streaming support: Enables streaming responses for supported models.
-- Flexible configuration: Allows customization of model parameters and settings.
-- Cost Monitoring: Integrates cost analysis and monitoring for running AWS Bedrock models, including detailed pricing breakdowns by model usage (e.g., input/output tokens, cache read tokens).
+- **Amazon Nova Support**: Direct integration with Amazon Nova Pro and Nova Lite models from AWS Bedrock.
+- **Configurable Model**: Choose between Nova Pro and Nova Lite via settings.
+- **Streaming Support**: Enables streaming responses for real-time interaction.
+- **Cost Monitoring**: Track and manage costs with built-in budget controls and pricing information.
+- **Flexible Configuration**: Customize model parameters and budget settings.
+
+## Supported Models
+
+| Model | Model ID | Description |
+|-------|----------|-------------|
+| Nova Pro | `amazon.nova-pro-v1:0` | High-performance model for complex tasks |
+| Nova Lite | `amazon.nova-lite-v1:0` | Cost-effective model for lighter workloads |
 
 ## How It Works
 
 1. The plugin uses the AWS Boto3 client to interact with Amazon Bedrock services.
-2. It dynamically fetches available models and guardrails from the Bedrock API.
-3. Custom Bedrock LLM classes are created for each available model.
-4. The plugin integrates with the Cheshire Cat AI framework, allowing the use of these models in various AI tasks.
-5. Cost Monitoring: The plugin now retrieves and monitors the cost of using various AWS Bedrock models by querying AWS pricing APIs. It provides breakdowns of model usage costs, such as token-based pricing, and helps users track their expenses.
+2. Configure your preferred Nova model (Pro or Lite) in the settings.
+3. The plugin integrates with the Cheshire Cat AI framework, allowing the use of Nova models in various AI tasks.
+4. Cost monitoring tracks token usage and provides detailed pricing breakdowns.
 
 ## Configuration
 
-The plugin provides a dynamic settings model that allows users to:
+The plugin provides settings that allow users to:
 
-- Enable/disable specific Bedrock models
-- Configure model-specific parameters (e.g., temperature, max tokens)
-- Set guardrails for enhanced security and compliance
-- Customize model behavior through additional keyword arguments
-- Enable Cost Monitoring: Configure the cost analysis feature to track usage-based pricing for different models and usage types (e.g., input-output tokens).
+- **Model ID**: Choose between Nova Pro (`amazon.nova-pro-v1:0`) or Nova Lite (`amazon.nova-lite-v1:0`)
+- **Model kwargs**: Configure model-specific parameters via JSON format
+- **Input/Output Token Price**: Customize pricing for accurate cost tracking
+- **Budget Mode**: Choose from:
+  - **Disabled**: No budget tracking
+  - **Monitor**: Log costs without restrictions
+  - **Notify**: Warn when budget is exceeded
+  - **Trace**: Show cost breakdown in responses
+  - **Block**: Prevent calls when budget is exceeded
+- **Budget Limit**: Set maximum budget in USD
+
+## Pricing
+
+### Nova Pro (US East region)
+- **Input tokens**: $0.0008 per 1,000 tokens
+- **Output tokens**: $0.0032 per 1,000 tokens
+
+### Nova Lite (US East region)
+- **Input tokens**: $0.00006 per 1,000 tokens
+- **Output tokens**: $0.00024 per 1,000 tokens
 
 ## Usage
 
 1. Ensure you have the necessary AWS credentials and permissions to access Amazon Bedrock services.
 2. Install the plugin in your Cheshire Cat AI environment.
-3. Configure the desired Bedrock models and settings through the Cheshire Cat AI interface.
-4. The plugin will automatically integrate the selected Bedrock models into your AI pipeline.
-5. Monitor Costs: Enable cost monitoring to keep track of the costs associated with the models.
+3. Configure the Nova model settings through the Cheshire Cat AI interface.
+4. Select your preferred model ID (Nova Pro or Nova Lite).
+5. The plugin will automatically integrate Nova into your AI pipeline.
+6. Optionally enable cost monitoring to track usage expenses.
 
-For detailed configuration options and advanced usage, please refer to the plugin settings in the Cheshire Cat AI interface.
+## Available Tools
+
+- **Get Current Model**: Shows the current model information
+- **Get Current Model Pricing**: Displays Nova Pro and Lite pricing details
+- **Get Current Model Cost**: Shows accumulated usage costs
+- **Reset Cumulative Model Cost**: Clears the cost tracking data
+
+## Requirements
+
+- Active AWS account with access to Amazon Bedrock services
+- AWS credentials configured with appropriate permissions
+- Access to Amazon Nova models in your AWS region
 
 ## Note
 
 This plugin requires an active AWS account with access to Amazon Bedrock services. Make sure you understand the pricing and usage terms of Amazon Bedrock before using this plugin in production environments.
+
+## Author
+
+Created by [bettinz](https://github.com/bettinz)
 
