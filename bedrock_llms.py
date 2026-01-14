@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 # IMPORTANT: This must match the folder name of the plugin
 PLUGIN_NAME = "amazon_bedrock_llms"
 
-# Default Nova model IDs (with region prefix)
-# Use us. for US regions, eu. for EU regions
-# Examples: us.amazon.nova-pro-v1:0, eu.amazon.nova-lite-v1:0
-NOVA_PRO_MODEL_ID = "us.amazon.nova-pro-v1:0"
-NOVA_LITE_MODEL_ID = "us.amazon.nova-lite-v1:0"
+# Default Nova model IDs
+# Model ID format: amazon.nova-{variant}-v1:0
+# The region is determined by the AWS client configuration, NOT by a prefix in the model ID
+NOVA_PRO_MODEL_ID = "amazon.nova-pro-v1:0"
+NOVA_LITE_MODEL_ID = "amazon.nova-lite-v1:0"
 DEFAULT_MODEL_ID = NOVA_PRO_MODEL_ID
 
 
@@ -214,13 +214,11 @@ class NovaLLMConfig(LLMSettings):
     model_id: str = Field(
         default=DEFAULT_MODEL_ID,
         description=(
-            "The Amazon Nova model ID with region prefix. "
-            "Use 'us.' for US regions or 'eu.' for EU regions.\n"
+            "The Amazon Nova model ID. "
+            "The region is determined by the AWS client configuration.\n"
             "Supported models:\n"
-            f"- Nova Pro (US): {NOVA_PRO_MODEL_ID}\n"
-            f"- Nova Lite (US): {NOVA_LITE_MODEL_ID}\n"
-            "- Nova Pro (EU): eu.amazon.nova-pro-v1:0\n"
-            "- Nova Lite (EU): eu.amazon.nova-lite-v1:0"
+            f"- Nova Pro: {NOVA_PRO_MODEL_ID}\n"
+            f"- Nova Lite: {NOVA_LITE_MODEL_ID}"
         ),
     )
     model_kwargs: Optional[str] = Field(
@@ -372,12 +370,11 @@ def get_current_model(data, cat):
     return (
         f"🤖 **Current Model Information**\n"
         f"🔹 **Model:** Amazon Nova\n"
-        f"🔹 **Available Models (use region prefix us. or eu.):**\n"
-        f"   - Nova Pro (US): `{NOVA_PRO_MODEL_ID}`\n"
-        f"   - Nova Lite (US): `{NOVA_LITE_MODEL_ID}`\n"
-        f"   - Nova Pro (EU): `eu.amazon.nova-pro-v1:0`\n"
-        f"   - Nova Lite (EU): `eu.amazon.nova-lite-v1:0`\n"
-        "Amazon Nova models are powerful foundation models from AWS Bedrock."
+        f"🔹 **Available Models:**\n"
+        f"   - Nova Pro: `{NOVA_PRO_MODEL_ID}`\n"
+        f"   - Nova Lite: `{NOVA_LITE_MODEL_ID}`\n"
+        "Amazon Nova models are powerful foundation models from AWS Bedrock.\n"
+        "Note: The region is determined by the AWS client configuration."
     )
 
 
