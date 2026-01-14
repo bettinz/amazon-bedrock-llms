@@ -28,11 +28,12 @@ NOVA_PRO_MODEL_ID = "us.amazon.nova-pro-v1:0"
 NOVA_LITE_MODEL_ID = "us.amazon.nova-lite-v1:0"
 DEFAULT_MODEL_ID = NOVA_PRO_MODEL_ID
 
-CACHED_COST_FILE = os.path.join(
-    MadHatter().plugins.get(PLUGIN_NAME)._path, "cached_model_costs.json"
-)
 
-bedrock_runtime_client = Boto3().get_client("bedrock-runtime")
+def get_cached_cost_file_path():
+    """Get the path to the cached cost file lazily."""
+    return os.path.join(
+        MadHatter().plugins.get(PLUGIN_NAME)._path, "cached_model_costs.json"
+    )
 
 
 class BudgetMode(str, Enum):
@@ -106,9 +107,10 @@ class NovaLLM(ChatBedrock):
 
     def get_current_model_cost(self):
         """Retrieves the total model cost from the cache file."""
-        if os.path.exists(CACHED_COST_FILE):
+        cached_cost_file = get_cached_cost_file_path()
+        if os.path.exists(cached_cost_file):
             try:
-                with open(CACHED_COST_FILE, "r") as file:
+                with open(cached_cost_file, "r") as file:
                     pricing_cache = json.load(file) or {}
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"Failed to load pricing cache. Error: {e}")
@@ -132,7 +134,8 @@ class NovaLLM(ChatBedrock):
 
         pricing_cache = {"current_cost": model_total_cost}
         try:
-            with open(CACHED_COST_FILE, "w") as file:
+            cached_cost_file = get_cached_cost_file_path()
+            with open(cached_cost_file, "w") as file:
                 json.dump(pricing_cache, file, indent=4)
         except IOError as e:
             logger.error(f"Error saving pricing cache: {e}")
@@ -277,7 +280,8 @@ def reset_cached_model_costs(data, cat):
     It ensures that future cost tracking starts from zero.
     """
     try:
-        with open(CACHED_COST_FILE, "w") as f:
+        cached_cost_file = get_cached_cost_file_path()
+        with open(cached_cost_file, "w") as f:
             json.dump({}, f)
         return "✅ Cumulative model cost has been reset."
     except Exception as e:
@@ -299,10 +303,11 @@ def get_current_model_cost(data, cat):
     Reads the cached model cost data and returns the total cost accumulated across all model invocations.
     """
     try:
-        if not os.path.exists(CACHED_COST_FILE):
+        cached_cost_file = get_cached_cost_file_path()
+        if not os.path.exists(cached_cost_file):
             return "⚠️ No cost data found. The cache might be empty."
 
-        with open(CACHED_COST_FILE, "r") as f:
+        with open(cached_cost_file, "r") as f:
             cost_data = json.load(f)
 
         total_cost = cost_data.get("current_cost", 0.0)
@@ -382,5 +387,3 @@ def settings_model():
         pass
 
     return NovaPluginSettings
-
-
