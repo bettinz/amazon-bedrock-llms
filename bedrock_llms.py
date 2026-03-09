@@ -161,14 +161,23 @@ class BedrockConverseChat(BaseChatModel):
     budget_mode: str = "Disabled"
     budget_limit: float = 0.0
 
+    # cached boto3 client — excluded from pydantic serialization
+    _client: Any = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        """Create and cache the boto3 bedrock-runtime client once at init time."""
+        object.__setattr__(self, "_client", Boto3().get_client("bedrock-runtime"))
 
     @property
     def _llm_type(self) -> str:
         return "bedrock-converse"
 
     def _get_client(self):
-        return Boto3().get_client("bedrock-runtime")
+        if self._client is None:
+            object.__setattr__(self, "_client", Boto3().get_client("bedrock-runtime"))
+        return self._client
 
     def _build_inference_config(self) -> Dict[str, Any]:
         cfg: Dict[str, Any] = {}
