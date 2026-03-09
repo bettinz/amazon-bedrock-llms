@@ -94,20 +94,36 @@ def get_default_claude_pricing(model_id: str):
     return CLAUDE_SONNET_4_INPUT_PRICE, CLAUDE_SONNET_4_OUTPUT_PRICE
 
 
+def _extract_text(content) -> str:
+    """Extract plain text from a message content that may be a string or a list of content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", str(block)))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(content)
+
+
 def _messages_to_bedrock(messages: List[BaseMessage]):
     """Convert LangChain messages to Bedrock Converse API format."""
     system_parts = []
     converse_messages = []
 
     for msg in messages:
+        text = _extract_text(msg.content)
         if isinstance(msg, SystemMessage):
-            system_parts.append({"text": msg.content})
+            system_parts.append({"text": text})
         elif isinstance(msg, HumanMessage):
-            converse_messages.append({"role": "user", "content": [{"text": msg.content}]})
+            converse_messages.append({"role": "user", "content": [{"text": text}]})
         elif isinstance(msg, AIMessage):
-            converse_messages.append({"role": "assistant", "content": [{"text": msg.content}]})
+            converse_messages.append({"role": "assistant", "content": [{"text": text}]})
         else:
-            converse_messages.append({"role": "user", "content": [{"text": str(msg.content)}]})
+            converse_messages.append({"role": "user", "content": [{"text": text}]})
 
     return system_parts, converse_messages
 
