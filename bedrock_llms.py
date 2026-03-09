@@ -1,7 +1,7 @@
 import os
 import json
 from enum import Enum
-from typing import List, Optional, Type
+from typing import List, Literal, Optional, Type
 
 from pydantic import Field, ConfigDict
 from langchain_core.messages import AIMessage
@@ -271,18 +271,13 @@ class NovaLLM(ChatBedrockConverse):
 class NovaLLMConfig(LLMSettings):
     """Configuration for Amazon Nova LLMs (Pro and Lite)."""
 
-    model_id: str = Field(
+    model_id: Literal[
+        "amazon.nova-pro-v1:0",
+        "amazon.nova-lite-v1:0",
+        "amazon.nova-2-lite-v1:0",
+    ] = Field(
         default=DEFAULT_MODEL_ID,
-        description=(
-            "The Amazon Nova model ID. "
-            "The region is determined by the AWS client configuration.\n"
-            "Supported models:\n"
-            f"Nova v1:\n"
-            f"- Nova Pro: {NOVA_PRO_MODEL_ID}\n"
-            f"- Nova Lite: {NOVA_LITE_MODEL_ID}\n"
-            f"Nova 2 (next-gen):\n"
-            f"- Nova 2 Lite: {NOVA_2_LITE_MODEL_ID}"
-        ),
+        description="The Amazon Nova model ID. The region is determined by the AWS client configuration.",
     )
     temperature: float = Field(
         default=0.7,
@@ -478,21 +473,16 @@ class ClaudeLLM(ChatBedrockConverse):
 class ClaudeLLMConfig(LLMSettings):
     """Configuration for Anthropic Claude models via AWS Bedrock."""
 
-    model_id: str = Field(
+    model_id: Literal[
+        "anthropic.claude-sonnet-4-6",
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "anthropic.claude-sonnet-4-20250514-v1:0",
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+        "anthropic.claude-opus-4-6-v1",
+        "anthropic.claude-opus-4-5-20251101-v1:0",
+    ] = Field(
         default=DEFAULT_CLAUDE_MODEL_ID,
-        description=(
-            "The Anthropic Claude model ID on AWS Bedrock.\n"
-            "Supported models:\n"
-            f"Claude Sonnet:\n"
-            f"- Claude Sonnet 4.6 (latest): {CLAUDE_SONNET_4_6_MODEL_ID}\n"
-            f"- Claude Sonnet 4.5: {CLAUDE_SONNET_4_5_MODEL_ID}\n"
-            f"- Claude Sonnet 4: {CLAUDE_SONNET_4_MODEL_ID}\n"
-            f"Claude Haiku:\n"
-            f"- Claude Haiku 4.5: {CLAUDE_HAIKU_4_5_MODEL_ID}\n"
-            f"Claude Opus:\n"
-            f"- Claude Opus 4.6 (latest): {CLAUDE_OPUS_4_6_MODEL_ID}\n"
-            f"- Claude Opus 4.5: {CLAUDE_OPUS_4_5_MODEL_ID}"
-        ),
+        description="The Anthropic Claude model ID on AWS Bedrock.",
     )
     temperature: float = Field(
         default=0.7,
