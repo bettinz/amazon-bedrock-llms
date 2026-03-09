@@ -1,11 +1,18 @@
 import os
 import json
 from enum import Enum
-from typing import List, Literal, Optional, Type
+from typing import Any, Dict, List, Literal, Optional, Type
 
 from pydantic import Field, ConfigDict
-from langchain_core.messages import AIMessage
-from langchain_aws import ChatBedrockConverse
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatResult
 import logging
 
 from cat.mad_hatter.decorators import tool, hook, plugin
@@ -18,51 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# IMPORTANT: This must match the folder name of the plugin
 PLUGIN_NAME = "amazon_bedrock_llms"
 
-# Default Nova model IDs
-# Model ID format: amazon.nova-{variant}-v{version}:0
-# The region is determined by the AWS client configuration, NOT by a prefix in the model ID
-
-# Nova v1 models
-NOVA_PRO_MODEL_ID = "amazon.nova-pro-v1:0"
-NOVA_LITE_MODEL_ID = "amazon.nova-lite-v1:0"
-
-# Nova 2 models (next-gen)
+# ── Nova model IDs ────────────────────────────────────────────────────────────
+NOVA_PRO_MODEL_ID    = "amazon.nova-pro-v1:0"
+NOVA_LITE_MODEL_ID   = "amazon.nova-lite-v1:0"
 NOVA_2_LITE_MODEL_ID = "amazon.nova-2-lite-v1:0"
 
 DEFAULT_MODEL_ID = NOVA_PRO_MODEL_ID
-
-
-def get_cached_cost_file_path():
-    """Get the path to the cached cost file lazily."""
-    return os.path.join(
-        MadHatter().plugins.get(PLUGIN_NAME)._path, "cached_model_costs.json"
-    )
-
-
-class BudgetMode(str, Enum):
-    DISABLED = "Disabled"
-    MONITOR = "Monitor"
-    NOTIFY = "Notify"
-    TRACE = "Trace"
-    BLOCK = "Block"
-
-
-# Nova Pro v1 pricing (per 1K tokens) - US East region
-NOVA_PRO_INPUT_PRICE = 0.0008  # $0.0008 per 1K input tokens
-NOVA_PRO_OUTPUT_PRICE = 0.0032  # $0.0032 per 1K output tokens
-
-# Nova Lite v1 pricing (per 1K tokens) - US East region
-NOVA_LITE_INPUT_PRICE = 0.00006  # $0.00006 per 1K input tokens
-NOVA_LITE_OUTPUT_PRICE = 0.00024  # $0.00024 per 1K output tokens
-
-# Nova 2 Lite pricing (per 1K tokens) - US East region
-NOVA_2_LITE_INPUT_PRICE = 0.00006   # $0.00006 per 1K input tokens
-NOVA_2_LITE_OUTPUT_PRICE = 0.00024  # $0.00024 per 1K output tokens
-
-NOVA_TOKEN_UNIT = 1000
 
 # ── Claude model IDs ──────────────────────────────────────────────────────────
 CLAUDE_SONNET_4_6_MODEL_ID = "anthropic.claude-sonnet-4-6"
@@ -74,23 +44,48 @@ CLAUDE_OPUS_4_6_MODEL_ID   = "anthropic.claude-opus-4-6-v1"
 
 DEFAULT_CLAUDE_MODEL_ID = CLAUDE_SONNET_4_6_MODEL_ID
 
-# Claude Sonnet 4.x pricing (per 1K tokens) - US East region
-CLAUDE_SONNET_4_INPUT_PRICE  = 0.003   # $0.003 per 1K input tokens
-CLAUDE_SONNET_4_OUTPUT_PRICE = 0.015   # $0.015 per 1K output tokens
+# ── Pricing (per 1K tokens, US East) ─────────────────────────────────────────
+NOVA_PRO_INPUT_PRICE     = 0.0008
+NOVA_PRO_OUTPUT_PRICE    = 0.0032
+NOVA_LITE_INPUT_PRICE    = 0.00006
+NOVA_LITE_OUTPUT_PRICE   = 0.00024
+NOVA_2_LITE_INPUT_PRICE  = 0.00006
+NOVA_2_LITE_OUTPUT_PRICE = 0.00024
+NOVA_TOKEN_UNIT          = 1000
 
-# Claude Haiku 4.x pricing (per 1K tokens) - US East region
-CLAUDE_HAIKU_4_INPUT_PRICE  = 0.0008   # $0.0008 per 1K input tokens
-CLAUDE_HAIKU_4_OUTPUT_PRICE = 0.004    # $0.004 per 1K output tokens
+CLAUDE_SONNET_4_INPUT_PRICE  = 0.003
+CLAUDE_SONNET_4_OUTPUT_PRICE = 0.015
+CLAUDE_HAIKU_4_INPUT_PRICE   = 0.0008
+CLAUDE_HAIKU_4_OUTPUT_PRICE  = 0.004
+CLAUDE_OPUS_4_INPUT_PRICE    = 0.015
+CLAUDE_OPUS_4_OUTPUT_PRICE   = 0.075
+CLAUDE_TOKEN_UNIT            = 1000
 
-# Claude Opus 4.x pricing (per 1K tokens) - US East region
-CLAUDE_OPUS_4_INPUT_PRICE  = 0.015    # $0.015 per 1K input tokens
-CLAUDE_OPUS_4_OUTPUT_PRICE = 0.075    # $0.075 per 1K output tokens
 
-CLAUDE_TOKEN_UNIT = 1000
+def get_cached_cost_file_path():
+    return os.path.join(
+        MadHatter().plugins.get(PLUGIN_NAME)._path, "cached_model_costs.json"
+    )
+
+
+class BudgetMode(str, Enum):
+    DISABLED = "Disabled"
+    MONITOR  = "Monitor"
+    NOTIFY   = "Notify"
+    TRACE    = "Trace"
+    BLOCK    = "Block"
+
+
+def get_default_pricing(model_id: str):
+    m = model_id.lower()
+    if "nova-2" in m and "lite" in m:
+        return NOVA_2_LITE_INPUT_PRICE, NOVA_2_LITE_OUTPUT_PRICE
+    if "lite" in m:
+        return NOVA_LITE_INPUT_PRICE, NOVA_LITE_OUTPUT_PRICE
+    return NOVA_PRO_INPUT_PRICE, NOVA_PRO_OUTPUT_PRICE
 
 
 def get_default_claude_pricing(model_id: str):
-    """Returns default pricing based on Claude model ID."""
     m = model_id.lower()
     if "haiku" in m:
         return CLAUDE_HAIKU_4_INPUT_PRICE, CLAUDE_HAIKU_4_OUTPUT_PRICE
@@ -99,238 +94,217 @@ def get_default_claude_pricing(model_id: str):
     return CLAUDE_SONNET_4_INPUT_PRICE, CLAUDE_SONNET_4_OUTPUT_PRICE
 
 
-def get_default_pricing(model_id: str):
-    """Returns default pricing based on model ID."""
-    model_id_lower = model_id.lower()
-    is_nova2 = "nova-2" in model_id_lower
-    is_lite = "lite" in model_id_lower
+def _messages_to_bedrock(messages: List[BaseMessage]):
+    """Convert LangChain messages to Bedrock Converse API format."""
+    system_parts = []
+    converse_messages = []
 
-    if is_nova2 and is_lite:
-        return NOVA_2_LITE_INPUT_PRICE, NOVA_2_LITE_OUTPUT_PRICE
-    if is_lite:
-        return NOVA_LITE_INPUT_PRICE, NOVA_LITE_OUTPUT_PRICE
-    return NOVA_PRO_INPUT_PRICE, NOVA_PRO_OUTPUT_PRICE
-
-
-class NovaLLM(ChatBedrockConverse):
-    """Custom ChatBedrockConverse class for Amazon Nova models (Pro and Lite)."""
-
-    def __init__(self, **kwargs):
-        model_id = kwargs.get("model_id", DEFAULT_MODEL_ID)
-        default_input_price, default_output_price = get_default_pricing(model_id)
-
-        # Parse model_kwargs if it's a string
-        model_kwargs = kwargs.get("model_kwargs", "{}")
-        if isinstance(model_kwargs, str):
-            try:
-                model_kwargs = json.loads(model_kwargs)
-            except json.JSONDecodeError:
-                model_kwargs = {}
-
-        # Get inference parameters from settings
-        temperature = kwargs.get("temperature", 0.7)
-        max_tokens = kwargs.get("max_tokens", 4096)
-        top_p = kwargs.get("top_p", 0.9)
-
-        # Build input kwargs for ChatBedrockConverse
-        input_kwargs = {
-            "model": model_id,
-            "client": Boto3().get_client("bedrock-runtime"),
-            "temperature": float(temperature) if temperature is not None else None,
-            "max_tokens": int(max_tokens) if max_tokens is not None else None,
-            "top_p": float(top_p) if top_p is not None else None,
-        }
-
-        if model_kwargs:
-            input_kwargs["additional_model_request_fields"] = model_kwargs
-
-        # Remove None values
-        input_kwargs = {k: v for k, v in input_kwargs.items() if v is not None}
-
-        super(NovaLLM, self).__init__(**input_kwargs)
-
-        if kwargs.get("budget_mode", "Disabled") != "Disabled":
-            budget_limit = kwargs.get("budget_limit", 0.0)
-            input_price = kwargs.get("input_token_price", default_input_price)
-            output_price = kwargs.get("output_token_price", default_output_price)
-
-            def parse_float(value, default=0.0):
-                if isinstance(value, (int, float)):
-                    return float(value)
-                return float(value) if str(value).replace(".", "", 1).isdigit() else default
-
-            budget_limit = parse_float(budget_limit)
-            input_price = parse_float(input_price)
-            output_price = parse_float(output_price)
-
-            setattr(
-                NovaLLM,
-                "_budget_config",
-                {
-                    "budget_limit": budget_limit,
-                    "input_token_price": input_price / NOVA_TOKEN_UNIT,
-                    "output_token_price": output_price / NOVA_TOKEN_UNIT,
-                    "budget_mode": kwargs.get("budget_mode", "Disabled"),
-                },
-            )
-
-    def get_current_model_cost(self):
-        """Retrieves the total model cost from the cache file."""
-        cached_cost_file = get_cached_cost_file_path()
-        if os.path.exists(cached_cost_file):
-            try:
-                with open(cached_cost_file, "r") as file:
-                    pricing_cache = json.load(file) or {}
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to load pricing cache. Error: {e}")
-                pricing_cache = {}
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            system_parts.append({"text": msg.content})
+        elif isinstance(msg, HumanMessage):
+            converse_messages.append({"role": "user", "content": [{"text": msg.content}]})
+        elif isinstance(msg, AIMessage):
+            converse_messages.append({"role": "assistant", "content": [{"text": msg.content}]})
         else:
-            pricing_cache = {}
+            converse_messages.append({"role": "user", "content": [{"text": str(msg.content)}]})
 
-        return float(pricing_cache.get("current_cost", 0.0))
+    return system_parts, converse_messages
 
-    def compute_invocation_cost(self, input_tokens, output_tokens, total_tokens):
-        """Computes cost for the current request and updates the total model cost."""
-        budget_config = getattr(self, "_budget_config", {})
-        input_price = budget_config.get("input_token_price", 0.0)
-        output_price = budget_config.get("output_token_price", 0.0)
 
-        input_cost = input_price * input_tokens
-        output_cost = output_price * output_tokens
-        current_request_cost = round(input_cost + output_cost, 6)
-
-        model_total_cost = self.get_current_model_cost() + current_request_cost
-
-        pricing_cache = {"current_cost": model_total_cost}
+def _load_cost_cache(path: str) -> float:
+    if os.path.exists(path):
         try:
-            cached_cost_file = get_cached_cost_file_path()
-            with open(cached_cost_file, "w") as file:
-                json.dump(pricing_cache, file, indent=4)
-        except IOError as e:
-            logger.error(f"Error saving pricing cache: {e}")
+            with open(path, "r") as f:
+                return float((json.load(f) or {}).get("current_cost", 0.0))
+        except (json.JSONDecodeError, IOError):
+            pass
+    return 0.0
 
-        return model_total_cost, current_request_cost
 
-    def invoke(self, *args, **kwargs):
-        budget_config = getattr(self, "_budget_config", {})
-        budget_mode = str(budget_config.get("budget_mode", BudgetMode.DISABLED)).capitalize()
-        budget_limit = float(budget_config.get("budget_limit", 0.0))
+def _save_cost_cache(path: str, total: float):
+    try:
+        with open(path, "w") as f:
+            json.dump({"current_cost": total}, f, indent=4)
+    except IOError as e:
+        logger.error(f"Error saving pricing cache: {e}")
 
-        model_total_cost = self.get_current_model_cost()
+
+class BedrockConverseChat(BaseChatModel):
+    """
+    LangChain BaseChatModel that calls AWS Bedrock Converse API directly via boto3.
+    No dependency on langchain-aws.
+    """
+    model_id: str
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    top_p: float = 0.9
+    token_unit: int = 1000
+    input_token_price: float = 0.0
+    output_token_price: float = 0.0
+    budget_mode: str = "Disabled"
+    budget_limit: float = 0.0
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "bedrock-converse"
+
+    def _get_client(self):
+        return Boto3().get_client("bedrock-runtime")
+
+    def _build_inference_config(self) -> Dict[str, Any]:
+        cfg: Dict[str, Any] = {}
+        if self.max_tokens:
+            cfg["maxTokens"] = self.max_tokens
+        if self.temperature is not None:
+            cfg["temperature"] = self.temperature
+        if self.top_p is not None:
+            cfg["topP"] = self.top_p
+        return cfg
+
+    def _get_current_cost(self) -> float:
+        return _load_cost_cache(get_cached_cost_file_path())
+
+    def _compute_and_save_cost(self, input_tokens: int, output_tokens: int):
+        price_in  = (self.input_token_price  / self.token_unit) * input_tokens
+        price_out = (self.output_token_price / self.token_unit) * output_tokens
+        request_cost = round(price_in + price_out, 6)
+        total_cost   = round(self._get_current_cost() + request_cost, 6)
+        _save_cost_cache(get_cached_cost_file_path(), total_cost)
+        return total_cost, request_cost
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs,
+    ) -> ChatResult:
+        budget_mode  = self.budget_mode.capitalize()
+        budget_limit = self.budget_limit
+        total_cost   = self._get_current_cost()
 
         alert_message = ""
-        if budget_limit > 0 and model_total_cost > budget_limit:
+        if budget_limit > 0 and total_cost > budget_limit:
             alert_message = f"⚠️ **Budget Limit Exceeded!** Budget Limit: ${budget_limit:.6f}"
             logger.warning(alert_message)
 
-        if budget_mode == BudgetMode.BLOCK.value and model_total_cost > budget_limit:
-            return AIMessage(
-                content="⛔ **Invocation Blocked Due to Budget Constraints.**\n"
-                "Your request cannot be processed because the total cost has exceeded the budget limit.\n"
-                "💰 **Cost Breakdown:**\n"
-                f"   - 🎯 **Budget Limit:** `${budget_limit:.6f}`\n"
-                f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
+        if budget_mode == BudgetMode.BLOCK.value and budget_limit > 0 and total_cost > budget_limit:
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(
+                content=(
+                    "⛔ **Invocation Blocked Due to Budget Constraints.**\n"
+                    f"   - 🎯 **Budget Limit:** `${budget_limit:.6f}`\n"
+                    f"   - 📊 Total Cost: `${total_cost:.6f}`"
+                )
+            ))])
+
+        system_parts, converse_messages = _messages_to_bedrock(messages)
+
+        request: Dict[str, Any] = {
+            "modelId": self.model_id,
+            "messages": converse_messages,
+            "inferenceConfig": self._build_inference_config(),
+        }
+        if system_parts:
+            request["system"] = system_parts
+
+        client = self._get_client()
+        response = client.converse(**request)
+
+        output_content = response["output"]["message"]["content"][0]["text"]
+        usage = response.get("usage", {})
+        input_tokens  = usage.get("inputTokens", 0)
+        output_tokens = usage.get("outputTokens", 0)
+
+        total_cost, request_cost = self._compute_and_save_cost(input_tokens, output_tokens)
+
+        if budget_mode == BudgetMode.MONITOR.value:
+            logger.info(f"Invocation Cost: ${request_cost:.6f}")
+            logger.info(f"Total Cost (All Calls): ${total_cost:.6f}")
+            if alert_message:
+                logger.warning(alert_message)
+
+        if budget_mode == BudgetMode.NOTIFY.value and alert_message:
+            output_content += f"\n\n🚨 **{alert_message}** 🚨\n"
+
+        if budget_mode == BudgetMode.TRACE.value:
+            output_content += "\n\n"
+            if alert_message:
+                output_content += f"🚨 **{alert_message}** 🚨\n"
+            output_content += (
+                f"💰 **Cost Breakdown:**\n"
+                f"   - 📝 Request Cost: `${request_cost:.6f}`\n"
+                f"   - 📊 Total Cost: `${total_cost:.6f}`"
             )
 
-        response = super().invoke(*args, **kwargs)
+        ai_message = AIMessage(
+            content=output_content,
+            usage_metadata={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "current_request_cost": request_cost,
+                "model_total_cost": total_cost,
+                "budget_mode": budget_mode,
+            },
+        )
+        return ChatResult(generations=[ChatGeneration(message=ai_message)])
 
-        try:
-            usage_metadata = response.usage_metadata
-            model_total_cost, current_request_cost = self.compute_invocation_cost(**usage_metadata)
 
-            response.usage_metadata["current_request_cost"] = round(current_request_cost, 6)
-            response.usage_metadata["model_total_cost"] = round(model_total_cost, 6)
+# ── Nova LLM ──────────────────────────────────────────────────────────────────
 
-            if budget_mode == BudgetMode.MONITOR.value:
-                logger.info(f"Invocation Cost: ${current_request_cost:.6f}")
-                logger.info(f"Total Cost (All Calls): ${model_total_cost:.6f}")
-                if alert_message:
-                    logger.warning(alert_message)
+class NovaLLM(BedrockConverseChat):
+    """Amazon Nova models via AWS Bedrock Converse API."""
 
-            if budget_mode == BudgetMode.NOTIFY.value and alert_message:
-                response.content += f"\n\n🚨 **{alert_message}** 🚨\n"
+    def __init__(self, **kwargs):
+        model_id = kwargs.get("model_id", DEFAULT_MODEL_ID)
+        default_in, default_out = get_default_pricing(model_id)
 
-            if budget_mode == BudgetMode.TRACE.value:
-                response.content += "\n\n"
-                if alert_message:
-                    response.content += f"🚨 **{alert_message}** 🚨\n"
-                response.content += (
-                    f"💰 **Cost Breakdown:**\n"
-                    f"   - 📝 Request Cost: `${current_request_cost:.6f}`\n"
-                    f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
-                )
-
-            response.usage_metadata["budget_mode"] = budget_mode
-
-        except Exception as e:
-            logger.error(f"Error processing cost computation: {e}")
-
-        return response
+        super().__init__(
+            model_id=model_id,
+            temperature=float(kwargs.get("temperature", 0.7)),
+            max_tokens=int(kwargs.get("max_tokens", 4096)),
+            top_p=float(kwargs.get("top_p", 0.9)),
+            token_unit=NOVA_TOKEN_UNIT,
+            input_token_price=float(kwargs.get("input_token_price", default_in)),
+            output_token_price=float(kwargs.get("output_token_price", default_out)),
+            budget_mode=kwargs.get("budget_mode", "Disabled"),
+            budget_limit=float(kwargs.get("budget_limit", 0.0)),
+        )
 
 
 class NovaLLMConfig(LLMSettings):
-    """Configuration for Amazon Nova LLMs (Pro and Lite)."""
+    """Configuration for Amazon Nova LLMs."""
 
     model_id: Literal[
         "amazon.nova-pro-v1:0",
         "amazon.nova-lite-v1:0",
         "amazon.nova-2-lite-v1:0",
-    ] = Field(
-        default=DEFAULT_MODEL_ID,
-        description="The Amazon Nova model ID. The region is determined by the AWS client configuration.",
-    )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Controls randomness in responses. Lower values (e.g., 0.2) make output more focused and deterministic, higher values (e.g., 0.8) make it more creative. Range: 0.0 to 1.0",
-    )
-    max_tokens: int = Field(
-        default=4096,
-        ge=1,
-        le=100000,
-        description="Maximum number of tokens to generate in the response.",
-    )
-    top_p: float = Field(
-        default=0.9,
-        ge=0.0,
-        le=1.0,
-        description="Nucleus sampling: only consider tokens with cumulative probability up to this value. Range: 0.0 to 1.0",
-    )
-    model_kwargs: Optional[str] = Field(
-        default="{}",
-        description="Additional keyword arguments for the model in JSON string format.",
-    )
-    input_token_price: float = Field(
-        default=NOVA_PRO_INPUT_PRICE,
-        description=f"The price per {NOVA_TOKEN_UNIT} input tokens (in USD). Default is Nova Pro pricing.",
-    )
-    output_token_price: float = Field(
-        default=NOVA_PRO_OUTPUT_PRICE,
-        description=f"The price per {NOVA_TOKEN_UNIT} output tokens (in USD). Default is Nova Pro pricing.",
-    )
-    budget_mode: BudgetMode = Field(
-        default=BudgetMode.DISABLED,
-        description=(
-            "The budget mode for the model, which controls cost monitoring and enforcement. "
-            "Options:\n"
-            "Disabled: No budget tracking or restrictions.\n"
-            "Monitor: Logs the cost of each invocation without any notifications or enforcement.\n"
-            "Notify: Sends a warning notification when the budget limit is exceeded.\n"
-            "Trace: Appends cost breakdown details to the model's response.\n"
-            "Block: Prevents further invocations once the budget limit is exceeded."
-        ),
-    )
-    budget_limit: Optional[float] = Field(
-        default=0.0,
-        description="The maximum budget for the model in USD.",
-    )
+    ] = Field(default=DEFAULT_MODEL_ID, description="Amazon Nova model ID.")
+
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0,
+        description="Randomness (0=deterministic, 1=creative).")
+    max_tokens: int = Field(default=4096, ge=1, le=100000,
+        description="Maximum tokens to generate.")
+    top_p: float = Field(default=0.9, ge=0.0, le=1.0,
+        description="Nucleus sampling threshold.")
+    input_token_price: float = Field(default=NOVA_PRO_INPUT_PRICE,
+        description=f"Price per {NOVA_TOKEN_UNIT} input tokens (USD).")
+    output_token_price: float = Field(default=NOVA_PRO_OUTPUT_PRICE,
+        description=f"Price per {NOVA_TOKEN_UNIT} output tokens (USD).")
+    budget_mode: BudgetMode = Field(default=BudgetMode.DISABLED,
+        description="Budget enforcement mode.")
+    budget_limit: Optional[float] = Field(default=0.0,
+        description="Maximum budget in USD (0 = unlimited).")
+
     _pyclass: Type = NovaLLM
 
     model_config = ConfigDict(
         json_schema_extra={
             "humanReadableName": "Amazon Nova",
-            "description": "Amazon Nova LLMs (Pro and Lite) - Powerful foundation models from AWS Bedrock",
+            "description": "Amazon Nova models (Pro, Lite, Nova 2 Lite) via AWS Bedrock",
             "link": "https://aws.amazon.com/bedrock/",
         },
         arbitrary_types_allowed=True,
@@ -340,134 +314,26 @@ class NovaLLMConfig(LLMSettings):
     )
 
 
-class ClaudeLLM(ChatBedrockConverse):
-    """Custom ChatBedrockConverse class for Anthropic Claude models via AWS Bedrock."""
+# ── Claude LLM ────────────────────────────────────────────────────────────────
+
+class ClaudeLLM(BedrockConverseChat):
+    """Anthropic Claude models via AWS Bedrock Converse API."""
 
     def __init__(self, **kwargs):
         model_id = kwargs.get("model_id", DEFAULT_CLAUDE_MODEL_ID)
-        default_input_price, default_output_price = get_default_claude_pricing(model_id)
+        default_in, default_out = get_default_claude_pricing(model_id)
 
-        model_kwargs = kwargs.get("model_kwargs", "{}")
-        if isinstance(model_kwargs, str):
-            try:
-                model_kwargs = json.loads(model_kwargs)
-            except json.JSONDecodeError:
-                model_kwargs = {}
-
-        temperature = kwargs.get("temperature", 0.7)
-        max_tokens = kwargs.get("max_tokens", 4096)
-        top_p = kwargs.get("top_p", 0.9)
-
-        input_kwargs = {
-            "model": model_id,
-            "client": Boto3().get_client("bedrock-runtime"),
-            "temperature": float(temperature) if temperature is not None else None,
-            "max_tokens": int(max_tokens) if max_tokens is not None else None,
-            "top_p": float(top_p) if top_p is not None else None,
-        }
-
-        if model_kwargs:
-            input_kwargs["additional_model_request_fields"] = model_kwargs
-
-        input_kwargs = {k: v for k, v in input_kwargs.items() if v is not None}
-
-        super(ClaudeLLM, self).__init__(**input_kwargs)
-
-        if kwargs.get("budget_mode", "Disabled") != "Disabled":
-            budget_limit = kwargs.get("budget_limit", 0.0)
-            input_price = kwargs.get("input_token_price", default_input_price)
-            output_price = kwargs.get("output_token_price", default_output_price)
-
-            def parse_float(value, default=0.0):
-                if isinstance(value, (int, float)):
-                    return float(value)
-                return float(value) if str(value).replace(".", "", 1).isdigit() else default
-
-            setattr(
-                ClaudeLLM,
-                "_budget_config",
-                {
-                    "budget_limit": parse_float(budget_limit),
-                    "input_token_price": parse_float(input_price) / CLAUDE_TOKEN_UNIT,
-                    "output_token_price": parse_float(output_price) / CLAUDE_TOKEN_UNIT,
-                    "budget_mode": kwargs.get("budget_mode", "Disabled"),
-                },
-            )
-
-    def get_current_model_cost(self):
-        cached_cost_file = get_cached_cost_file_path()
-        if os.path.exists(cached_cost_file):
-            try:
-                with open(cached_cost_file, "r") as f:
-                    return float((json.load(f) or {}).get("current_cost", 0.0))
-            except (json.JSONDecodeError, IOError):
-                pass
-        return 0.0
-
-    def compute_invocation_cost(self, input_tokens, output_tokens, total_tokens):
-        budget_config = getattr(self, "_budget_config", {})
-        input_cost = budget_config.get("input_token_price", 0.0) * input_tokens
-        output_cost = budget_config.get("output_token_price", 0.0) * output_tokens
-        current_request_cost = round(input_cost + output_cost, 6)
-        model_total_cost = self.get_current_model_cost() + current_request_cost
-        try:
-            with open(get_cached_cost_file_path(), "w") as f:
-                json.dump({"current_cost": model_total_cost}, f, indent=4)
-        except IOError as e:
-            logger.error(f"Error saving pricing cache: {e}")
-        return model_total_cost, current_request_cost
-
-    def invoke(self, *args, **kwargs):
-        budget_config = getattr(self, "_budget_config", {})
-        budget_mode = str(budget_config.get("budget_mode", BudgetMode.DISABLED)).capitalize()
-        budget_limit = float(budget_config.get("budget_limit", 0.0))
-        model_total_cost = self.get_current_model_cost()
-
-        alert_message = ""
-        if budget_limit > 0 and model_total_cost > budget_limit:
-            alert_message = f"⚠️ **Budget Limit Exceeded!** Budget Limit: ${budget_limit:.6f}"
-            logger.warning(alert_message)
-
-        if budget_mode == BudgetMode.BLOCK.value and model_total_cost > budget_limit:
-            return AIMessage(
-                content="⛔ **Invocation Blocked Due to Budget Constraints.**\n"
-                "Your request cannot be processed because the total cost has exceeded the budget limit.\n"
-                f"   - 🎯 **Budget Limit:** `${budget_limit:.6f}`\n"
-                f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
-            )
-
-        response = super().invoke(*args, **kwargs)
-
-        try:
-            usage_metadata = response.usage_metadata
-            model_total_cost, current_request_cost = self.compute_invocation_cost(**usage_metadata)
-            response.usage_metadata["current_request_cost"] = round(current_request_cost, 6)
-            response.usage_metadata["model_total_cost"] = round(model_total_cost, 6)
-
-            if budget_mode == BudgetMode.MONITOR.value:
-                logger.info(f"Invocation Cost: ${current_request_cost:.6f}")
-                logger.info(f"Total Cost (All Calls): ${model_total_cost:.6f}")
-                if alert_message:
-                    logger.warning(alert_message)
-
-            if budget_mode == BudgetMode.NOTIFY.value and alert_message:
-                response.content += f"\n\n🚨 **{alert_message}** 🚨\n"
-
-            if budget_mode == BudgetMode.TRACE.value:
-                response.content += "\n\n"
-                if alert_message:
-                    response.content += f"🚨 **{alert_message}** 🚨\n"
-                response.content += (
-                    f"💰 **Cost Breakdown:**\n"
-                    f"   - 📝 Request Cost: `${current_request_cost:.6f}`\n"
-                    f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
-                )
-
-            response.usage_metadata["budget_mode"] = budget_mode
-        except Exception as e:
-            logger.error(f"Error processing cost computation: {e}")
-
-        return response
+        super().__init__(
+            model_id=model_id,
+            temperature=float(kwargs.get("temperature", 0.7)),
+            max_tokens=int(kwargs.get("max_tokens", 4096)),
+            top_p=float(kwargs.get("top_p", 0.9)),
+            token_unit=CLAUDE_TOKEN_UNIT,
+            input_token_price=float(kwargs.get("input_token_price", default_in)),
+            output_token_price=float(kwargs.get("output_token_price", default_out)),
+            budget_mode=kwargs.get("budget_mode", "Disabled"),
+            budget_limit=float(kwargs.get("budget_limit", 0.0)),
+        )
 
 
 class ClaudeLLMConfig(LLMSettings):
@@ -480,61 +346,29 @@ class ClaudeLLMConfig(LLMSettings):
         "anthropic.claude-haiku-4-5-20251001-v1:0",
         "anthropic.claude-opus-4-6-v1",
         "anthropic.claude-opus-4-5-20251101-v1:0",
-    ] = Field(
-        default=DEFAULT_CLAUDE_MODEL_ID,
-        description="The Anthropic Claude model ID on AWS Bedrock.",
-    )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Controls randomness in responses. Range: 0.0 to 1.0",
-    )
-    max_tokens: int = Field(
-        default=4096,
-        ge=1,
-        le=200000,
-        description="Maximum number of tokens to generate in the response.",
-    )
-    top_p: float = Field(
-        default=0.9,
-        ge=0.0,
-        le=1.0,
-        description="Nucleus sampling parameter. Range: 0.0 to 1.0",
-    )
-    model_kwargs: Optional[str] = Field(
-        default="{}",
-        description="Additional keyword arguments for the model in JSON string format.",
-    )
-    input_token_price: float = Field(
-        default=CLAUDE_SONNET_4_INPUT_PRICE,
-        description=f"The price per {CLAUDE_TOKEN_UNIT} input tokens (in USD). Default is Claude Sonnet 4 pricing.",
-    )
-    output_token_price: float = Field(
-        default=CLAUDE_SONNET_4_OUTPUT_PRICE,
-        description=f"The price per {CLAUDE_TOKEN_UNIT} output tokens (in USD). Default is Claude Sonnet 4 pricing.",
-    )
-    budget_mode: BudgetMode = Field(
-        default=BudgetMode.DISABLED,
-        description=(
-            "The budget mode for the model.\n"
-            "Disabled: No budget tracking.\n"
-            "Monitor: Logs cost per invocation.\n"
-            "Notify: Warns when budget exceeded.\n"
-            "Trace: Appends cost to response.\n"
-            "Block: Stops invocations over budget."
-        ),
-    )
-    budget_limit: Optional[float] = Field(
-        default=0.0,
-        description="The maximum budget for the model in USD.",
-    )
+    ] = Field(default=DEFAULT_CLAUDE_MODEL_ID, description="Anthropic Claude model ID on AWS Bedrock.")
+
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0,
+        description="Randomness (0=deterministic, 1=creative).")
+    max_tokens: int = Field(default=4096, ge=1, le=200000,
+        description="Maximum tokens to generate.")
+    top_p: float = Field(default=0.9, ge=0.0, le=1.0,
+        description="Nucleus sampling threshold.")
+    input_token_price: float = Field(default=CLAUDE_SONNET_4_INPUT_PRICE,
+        description=f"Price per {CLAUDE_TOKEN_UNIT} input tokens (USD).")
+    output_token_price: float = Field(default=CLAUDE_SONNET_4_OUTPUT_PRICE,
+        description=f"Price per {CLAUDE_TOKEN_UNIT} output tokens (USD).")
+    budget_mode: BudgetMode = Field(default=BudgetMode.DISABLED,
+        description="Budget enforcement mode.")
+    budget_limit: Optional[float] = Field(default=0.0,
+        description="Maximum budget in USD (0 = unlimited).")
+
     _pyclass: Type = ClaudeLLM
 
     model_config = ConfigDict(
         json_schema_extra={
             "humanReadableName": "Anthropic Claude (Bedrock)",
-            "description": "Anthropic Claude models (Sonnet, Haiku, Opus) via AWS Bedrock",
+            "description": "Anthropic Claude models (Sonnet 4.6, Haiku 4.5, Opus 4.6) via AWS Bedrock",
             "link": "https://aws.amazon.com/bedrock/claude/",
         },
         arbitrary_types_allowed=True,
@@ -544,11 +378,11 @@ class ClaudeLLMConfig(LLMSettings):
     )
 
 
+# ── Hooks & Tools ─────────────────────────────────────────────────────────────
+
 @hook
 def agent_prompt_prefix(prefix, cat):
-    # Append instruction to hide cost info, don't replace the entire prefix
-    cost_instruction = "\nPlease do not include any cost breakdowns, request costs, or total cost information in responses."
-    return prefix + cost_instruction
+    return prefix + "\nPlease do not include any cost breakdowns, request costs, or total cost information in responses."
 
 
 @tool(
@@ -561,14 +395,9 @@ def agent_prompt_prefix(prefix, cat):
     ],
 )
 def reset_cached_model_costs(data, cat):
-    """Reset the cumulative model cost data.
-
-    This function clears the cached record of the total cost accumulated across all model invocations.
-    It ensures that future cost tracking starts from zero.
-    """
+    """Reset the cumulative model cost data."""
     try:
-        cached_cost_file = get_cached_cost_file_path()
-        with open(cached_cost_file, "w") as f:
+        with open(get_cached_cost_file_path(), "w") as f:
             json.dump({}, f)
         return "✅ Cumulative model cost has been reset."
     except Exception as e:
@@ -580,29 +409,20 @@ def reset_cached_model_costs(data, cat):
     return_direct=False,
     examples=[
         "What is the total cost of my model usage?",
-        "Show me the current cumulative cost for the model.",
         "How much have I spent on LLM calls so far?",
     ],
 )
 def get_current_model_cost(data, cat):
-    """Retrieve the current cumulative model cost.
-
-    Reads the cached model cost data and returns the total cost accumulated across all model invocations.
-    """
+    """Retrieve the current cumulative model cost."""
     try:
-        cached_cost_file = get_cached_cost_file_path()
-        if not os.path.exists(cached_cost_file):
-            return "⚠️ No cost data found. The cache might be empty."
-
-        with open(cached_cost_file, "r") as f:
-            cost_data = json.load(f)
-
-        total_cost = cost_data.get("current_cost", 0.0)
-
+        path = get_cached_cost_file_path()
+        if not os.path.exists(path):
+            return "⚠️ No cost data found."
+        total_cost = _load_cost_cache(path)
         return (
             f"💰 **Total Accumulated Cost:** `${total_cost:.6f}`\n"
             "🔹 This includes all previous model invocations.\n"
-            "⚠️ *The cost of the current request is not included and will be added after execution.*"
+            "⚠️ *The cost of the current request is not included.*"
         )
     except Exception as e:
         return f"❌ Error retrieving model cost: {str(e)}"
@@ -613,26 +433,20 @@ def get_current_model_cost(data, cat):
     return_direct=False,
     examples=[
         "How much does Nova Pro charge per token?",
-        "What is the pricing for Nova Lite?",
-        "Show the token price for Nova models.",
+        "What is the pricing for Claude Sonnet?",
     ],
 )
 def get_current_model_pricing(data, cat):
-    """Retrieve the pricing information for Amazon Nova models.
-
-    Returns the cost per token for Nova Pro and Nova Lite models.
-    """
+    """Retrieve pricing information for all supported models."""
     return (
         f"💲 **Amazon Nova Pricing**\n\n"
-        f"**Nova Pro:**\n"
-        f"🔹 **Input Cost:** ${NOVA_PRO_INPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens\n"
-        f"🔹 **Output Cost:** ${NOVA_PRO_OUTPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens\n\n"
-        f"**Nova Lite:**\n"
-        f"🔹 **Input Cost:** ${NOVA_LITE_INPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens\n"
-        f"🔹 **Output Cost:** ${NOVA_LITE_OUTPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens\n\n"
-        f"**Nova 2 Lite (next-gen):**\n"
-        f"🔹 **Input Cost:** ${NOVA_2_LITE_INPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens\n"
-        f"🔹 **Output Cost:** ${NOVA_2_LITE_OUTPUT_PRICE:.6f} per {NOVA_TOKEN_UNIT} tokens"
+        f"**Nova Pro:** ${NOVA_PRO_INPUT_PRICE:.6f} in / ${NOVA_PRO_OUTPUT_PRICE:.6f} out per {NOVA_TOKEN_UNIT} tokens\n"
+        f"**Nova Lite:** ${NOVA_LITE_INPUT_PRICE:.6f} in / ${NOVA_LITE_OUTPUT_PRICE:.6f} out per {NOVA_TOKEN_UNIT} tokens\n"
+        f"**Nova 2 Lite:** ${NOVA_2_LITE_INPUT_PRICE:.6f} in / ${NOVA_2_LITE_OUTPUT_PRICE:.6f} out per {NOVA_TOKEN_UNIT} tokens\n\n"
+        f"💲 **Anthropic Claude Pricing**\n\n"
+        f"**Claude Sonnet 4.x:** ${CLAUDE_SONNET_4_INPUT_PRICE:.6f} in / ${CLAUDE_SONNET_4_OUTPUT_PRICE:.6f} out per {CLAUDE_TOKEN_UNIT} tokens\n"
+        f"**Claude Haiku 4.x:** ${CLAUDE_HAIKU_4_INPUT_PRICE:.6f} in / ${CLAUDE_HAIKU_4_OUTPUT_PRICE:.6f} out per {CLAUDE_TOKEN_UNIT} tokens\n"
+        f"**Claude Opus 4.x:** ${CLAUDE_OPUS_4_INPUT_PRICE:.6f} in / ${CLAUDE_OPUS_4_OUTPUT_PRICE:.6f} out per {CLAUDE_TOKEN_UNIT} tokens"
     )
 
 
@@ -641,26 +455,24 @@ def get_current_model_pricing(data, cat):
     return_direct=False,
     examples=[
         "Which LLM model am I using?",
-        "What is my current AI model?",
-        "Show the model name I am working with.",
+        "What models are available?",
     ],
 )
 def get_current_model(data, cat):
-    """Retrieve the currently selected AI model.
-
-    Returns the name and ID of the model in use.
-    """
+    """Retrieve available AI models."""
     return (
-        f"🤖 **Current Model Information**\n"
-        f"🔹 **Model:** Amazon Nova\n"
-        f"🔹 **Available Models:**\n"
-        f"   **Nova v1:**\n"
+        f"🤖 **Available Models on AWS Bedrock**\n\n"
+        f"**Amazon Nova:**\n"
         f"   - Nova Pro: `{NOVA_PRO_MODEL_ID}`\n"
         f"   - Nova Lite: `{NOVA_LITE_MODEL_ID}`\n"
-        f"   **Nova 2 (next-gen):**\n"
-        f"   - Nova 2 Lite: `{NOVA_2_LITE_MODEL_ID}`\n"
-        "Amazon Nova models are powerful foundation models from AWS Bedrock.\n"
-        "Note: The region is determined by the AWS client configuration."
+        f"   - Nova 2 Lite: `{NOVA_2_LITE_MODEL_ID}`\n\n"
+        f"**Anthropic Claude:**\n"
+        f"   - Claude Sonnet 4.6: `{CLAUDE_SONNET_4_6_MODEL_ID}`\n"
+        f"   - Claude Sonnet 4.5: `{CLAUDE_SONNET_4_5_MODEL_ID}`\n"
+        f"   - Claude Sonnet 4: `{CLAUDE_SONNET_4_MODEL_ID}`\n"
+        f"   - Claude Haiku 4.5: `{CLAUDE_HAIKU_4_5_MODEL_ID}`\n"
+        f"   - Claude Opus 4.6: `{CLAUDE_OPUS_4_6_MODEL_ID}`\n"
+        f"   - Claude Opus 4.5: `{CLAUDE_OPUS_4_5_MODEL_ID}`\n"
     )
 
 
@@ -671,11 +483,9 @@ def factory_allowed_llms(allowed, cat) -> List:
 
 @plugin
 def settings_model():
-    """Plugin settings schema - this makes settings visible in the plugin page."""
     from pydantic import BaseModel
-
     class NovaPluginSettings(BaseModel):
-        """Settings for Amazon Nova LLM plugin."""
+        """Settings for Amazon Bedrock LLM plugin."""
         pass
 
     return NovaPluginSettings
