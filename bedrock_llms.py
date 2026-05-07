@@ -637,12 +637,22 @@ def get_amazon_bedrock_llm_configs(amazon_llms, Guardrails, config_llms={}):
 
 def create_dynamic_model(amazon_llms) -> BaseModel:
     dynamic_fields = {}
+    default_model_name = None
+
+    for model_name, llm_info in amazon_llms.items():
+        if llm_info[0]["model_arn"].endswith(DEFAULT_MODEL):
+            default_model_name = model_name
+            break
+
+    if default_model_name is None and amazon_llms:
+        default_model_name = next(iter(amazon_llms))
+
     for model_name, llm_info in amazon_llms.items():
         model_name = model_name.replace(".", "o")
         dynamic_fields[model_name] = (
             bool,
             Field(
-                default=llm_info[0]["model_arn"].endswith(DEFAULT_MODEL),
+                default=model_name == (default_model_name or "").replace(".", "o"),
                 description=f"Enable/disable the {model_name} model.",
             ),
         )
@@ -713,11 +723,11 @@ def settings_model():
 
 def factory_pipeline():
     AmazonBedrockLLMSettings = get_settings()
-    settings = AmazonBedrockLLMSettings()
-    settings.init_llm()
+    default_settings = AmazonBedrockLLMSettings().model_dump()
     aws_plugin = MadHatter().plugins.get(PLUGIN_NAME)
-    plugin_settings = aws_plugin.load_settings()
-    AmazonBedrockLLMSettings(**plugin_settings)
+    plugin_settings = aws_plugin.load_settings() or {}
+    effective_settings = {**default_settings, **plugin_settings}
+    settings = AmazonBedrockLLMSettings(**effective_settings)
     return settings.get_llms()
 
 
