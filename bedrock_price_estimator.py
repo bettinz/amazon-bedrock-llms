@@ -230,7 +230,7 @@ def get_flattened_product(original_data):
     return Product(**flattened_data)
 
 
-def fetch_aws_pricing(client):
+def fetch_aws_pricing(client) -> List[Product]:
     """
     Fetch AWS Bedrock pricing for a specific provider, handling pagination.
 
@@ -346,7 +346,7 @@ def get_model_names(pricing_data: List[Product]) -> List[str]:
     return sorted(model_names)
 
 
-def parse_pricing_with_model(model_names: str, model_id: str, client: Any) -> str:
+def parse_pricing_with_model(model_names: List[str], model_id: str, client: Any) -> str:
     try:
         return _resolve_model_name_locally(model_names, model_id)
 

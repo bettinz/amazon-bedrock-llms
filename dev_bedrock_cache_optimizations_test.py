@@ -4,7 +4,7 @@ import ast
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 SOURCE_PATH = Path(__file__).with_name("bedrock_llms.py")
 TARGET_FUNCTIONS = {
@@ -73,6 +73,7 @@ def _load_functions():
         "os": __import__("os"),
         "tempfile": __import__("tempfile"),
         "Lock": _FakeLock,
+        "cast": cast,
     }
     exec(compiled, namespace)
     return namespace

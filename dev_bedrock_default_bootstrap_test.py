@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from typing import cast
+
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 SOURCE_PATH = Path(__file__).with_name("bedrock_llms.py")
@@ -22,6 +24,7 @@ def _load_create_dynamic_model():
         "ConfigDict": ConfigDict,
         "Field": Field,
         "create_model": create_model,
+        "cast": cast,
         "DEFAULT_MODEL": "amazon.titan-tg1-large",
     }
     exec(compiled, namespace)
