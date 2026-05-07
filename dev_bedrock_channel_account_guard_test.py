@@ -4,7 +4,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from typing import Type
+from typing import Any, Type, cast
 
 from pydantic import BaseModel
 
@@ -101,27 +101,25 @@ class _FakeLLMSettings(BaseModel):
     def get_llm_from_config(cls, config):
         if cls._pyclass is None:
             raise Exception("_pyclass must not be None")
-        return cls._pyclass.default(**config)
+        return cast(Any, cls._pyclass).default(**config)
 
 
-class _FakeRuntimeModel:
+class _RestrictedChatBedrock:
     def __init__(self, *args, **kwargs):
-        self.args = args
         self.kwargs = kwargs
 
     def invoke(self, *args, **kwargs):
-        return types.SimpleNamespace(content="ok", usage_metadata={})
+        raise ValueError(
+            "Error raised by bedrock service: An error occurred (ValidationException) when calling the InvokeModelWithResponseStream operation: "
+            "Access to this model is not available for channel program accounts. Reach out to your AWS Solution Provider or AWS Distributor for more information."
+        )
 
 
-class _FakeChatBedrock(_FakeRuntimeModel):
+class _FakeBedrockLLM(_RestrictedChatBedrock):
     pass
 
 
-class _FakeChatBedrockConverse(_FakeRuntimeModel):
-    pass
-
-
-class _FakeBedrockLLM(_FakeRuntimeModel):
+class _FakeChatBedrockConverse(_RestrictedChatBedrock):
     pass
 
 
@@ -179,7 +177,7 @@ def _install_stubs():
     _install_module(
         "langchain_aws",
         BedrockLLM=_FakeBedrockLLM,
-        ChatBedrock=_FakeChatBedrock,
+        ChatBedrock=_RestrictedChatBedrock,
         ChatBedrockConverse=_FakeChatBedrockConverse,
     )
 
@@ -202,7 +200,7 @@ def _install_stubs():
 
 def _load_module():
     spec = importlib.util.spec_from_file_location(
-        "bedrock_llms_instantiation_smoke", SOURCE_PATH
+        "bedrock_channel_guard_smoke", SOURCE_PATH
     )
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -216,8 +214,6 @@ def main() -> int:
     module = _load_module()
 
     allowed_llms = module.factory_pipeline()
-    assert allowed_llms, "factory_pipeline deve restituire almeno un LLM configurabile"
-
     selected_llm = next(
         llm
         for llm in allowed_llms
@@ -225,39 +221,19 @@ def main() -> int:
         == "Amazon Bedrock: Anthropic Claude 3 Sonnet"
     )
 
-    config = selected_llm().model_dump()
-    assert selected_llm._pyclass is not None
-    runtime_llm = selected_llm.get_llm_from_config(config)
+    runtime_llm = selected_llm.get_llm_from_config(selected_llm().model_dump())
+    response = runtime_llm.invoke("hello")
 
-    assert isinstance(runtime_llm, _FakeChatBedrock)
-    assert runtime_llm.kwargs["model_id"].endswith(
-        "anthropic.claude-3-sonnet-20240229-v1:0"
-    )
-    assert runtime_llm.kwargs["provider"] == "anthropic"
-    assert runtime_llm.kwargs["streaming"] is True
-    assert runtime_llm.kwargs["model_kwargs"] == {}
+    assert isinstance(response, _FakeAIMessage)
+    assert "not available for your AWS account" in response.content
+    assert "channel-program entitlement restriction" in response.content
 
-    overridden_config = dict(config)
-    overridden_config["model_id"] = (
-        "arn:aws:bedrock:eu-west-1:992382436155:inference-profile/"
-        "eu.amazon.nova-2-lite-v1:0"
-    )
-    overridden_config["model_kwargs"] = '{"temperature": 0.5}'
-    overridden_runtime_llm = selected_llm.get_llm_from_config(overridden_config)
-
-    assert isinstance(overridden_runtime_llm, _FakeChatBedrockConverse)
-    assert overridden_runtime_llm.kwargs["model_id"].endswith(
-        "eu.amazon.nova-2-lite-v1:0"
-    )
-    assert overridden_runtime_llm.kwargs["provider"] == "amazon"
-    assert overridden_runtime_llm.kwargs["temperature"] == 0.5
-    assert "model_kwargs" not in overridden_runtime_llm.kwargs
-
-    print("Bedrock LLM instantiation: OK")
+    print("Bedrock channel account guard: OK")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

@@ -5,6 +5,7 @@ import os
 import sys
 import types
 from pathlib import Path
+from typing import Type
 
 from pydantic import BaseModel
 
@@ -15,7 +16,10 @@ class _FakePlugins:
     def __init__(self):
         self.calls: list[str] = []
         self._plugin = types.SimpleNamespace(
-            load_settings=lambda: {"Anthropic Claude 3 Sonnet": True}
+            load_settings=lambda: {
+                "Anthropic Claude 3 Sonnet": True,
+                "arn:aws:bedrock:eu-west-1:992382436155:inference-profile/eu.amazon.nova-2-lite-v1:0": "custom user note",
+            }
         )
 
     def get(self, name: str):
@@ -104,7 +108,13 @@ class _FakeCrudModule:
 
 
 class _FakeLLMSettings(BaseModel):
-    pass
+    _pyclass: Type = None
+
+    @classmethod
+    def get_llm_from_config(cls, config):
+        if cls._pyclass is None:
+            raise Exception("_pyclass must not be None")
+        return cls._pyclass.default(**config)
 
 
 class _FakeCoreLLMConfig(BaseModel):
@@ -205,7 +215,10 @@ def main() -> int:
     assert "langchain_aws" not in sys.modules, "il test deve simulare l'assenza di langchain_aws durante il bootstrap delle settings"
 
     loaded_settings = module._load_plugin_settings()
-    assert loaded_settings == {"Anthropic Claude 3 Sonnet": True}
+    assert loaded_settings == {
+        "Anthropic Claude 3 Sonnet": True,
+        "arn:aws:bedrock:eu-west-1:992382436155:inference-profile/eu.amazon.nova-2-lite-v1:0": "custom user note",
+    }
     assert "amazon-bedrock-llms" in fake_plugins.calls, "deve cercare anche il nome plugin con trattini"
     assert _FakeBoto3Session.calls == [], "caricare le settings del plugin non deve toccare AWS"
 
@@ -247,6 +260,10 @@ def main() -> int:
         llm.model_config["json_schema_extra"]["humanReadableName"] == "Amazon Bedrock: Anthropic Claude 3 Sonnet"
         for llm in allowed_llms
     ), "le settings salvate del plugin devono ancora selezionare il modello Bedrock desiderato"
+    assert all(
+        llm.__name__ != "CustomBedrockLLMArnAwsBedrockEuWest1992382436155InferenceprofileEuAmazonNova2LiteV10"
+        for llm in allowed_llms
+    ), "una ARN messa nelle plugin preferences non deve essere interpretata come un modello Bedrock selezionabile"
 
     print("Bedrock import resilience: OK")
     return 0

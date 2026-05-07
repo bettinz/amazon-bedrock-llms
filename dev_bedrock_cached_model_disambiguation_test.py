@@ -4,7 +4,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from typing import Type
+from typing import Any, Type, cast
 
 from pydantic import BaseModel
 
@@ -13,9 +13,7 @@ SOURCE_PATH = Path(__file__).with_name("bedrock_llms.py")
 
 class _FakePlugins:
     def __init__(self):
-        self._plugin = types.SimpleNamespace(
-            load_settings=lambda: {"Anthropic Claude 3 Sonnet": True}
-        )
+        self._plugin = types.SimpleNamespace(load_settings=lambda: {})
 
     def get(self, name: str):
         if name == "amazon-bedrock-llms":
@@ -101,7 +99,11 @@ class _FakeLLMSettings(BaseModel):
     def get_llm_from_config(cls, config):
         if cls._pyclass is None:
             raise Exception("_pyclass must not be None")
-        return cls._pyclass.default(**config)
+        return cast(Any, cls._pyclass).default(**config)
+
+
+class _FakeCoreLLMConfig(BaseModel):
+    pass
 
 
 class _FakeRuntimeModel:
@@ -122,10 +124,6 @@ class _FakeChatBedrockConverse(_FakeRuntimeModel):
 
 
 class _FakeBedrockLLM(_FakeRuntimeModel):
-    pass
-
-
-class _FakeCoreLLMConfig(BaseModel):
     pass
 
 
@@ -186,13 +184,15 @@ def _install_stubs():
     def parse_pricing_with_model(model_names, model_id, client):
         if model_id.startswith("anthropic.claude-3-sonnet"):
             return "Anthropic Claude 3 Sonnet"
+        if model_id.startswith("eu.anthropic.claude-sonnet-4"):
+            return "Anthropic Claude 3 Sonnet"
         return "Error"
 
     _install_module(
         "bedrock_price_estimator",
         fetch_aws_pricing=lambda client: [],
         parse_pricing_with_model=parse_pricing_with_model,
-        get_model_names=lambda pricing_data: [],
+        get_model_names=lambda pricing_data: ["Anthropic Claude 3 Sonnet"],
         filter_pricing_by_model=lambda pricing_data, model_name: [],
         extract_model_pricing=lambda filtered_pricing, model_id: {
             model_id: {"input": {}, "output": {}, "cache_read_input": {}}
@@ -202,7 +202,7 @@ def _install_stubs():
 
 def _load_module():
     spec = importlib.util.spec_from_file_location(
-        "bedrock_llms_instantiation_smoke", SOURCE_PATH
+        "bedrock_cached_disambiguation_smoke", SOURCE_PATH
     )
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -215,49 +215,22 @@ def main() -> int:
     _install_stubs()
     module = _load_module()
 
-    allowed_llms = module.factory_pipeline()
-    assert allowed_llms, "factory_pipeline deve restituire almeno un LLM configurabile"
+    cached_models = module.get_cached_available_models()
+    sonnet_models = cached_models["Anthropic Claude 3 Sonnet"]
+    assert all(
+        ":inference-profile/" not in model["model_arn"] for model in sonnet_models
+    ), "il fallback cached non deve mischiare inference profile Sonnet 4 con Claude 3 Sonnet"
 
-    selected_llm = next(
-        llm
-        for llm in allowed_llms
-        if llm.model_config["json_schema_extra"]["humanReadableName"]
-        == "Amazon Bedrock: Anthropic Claude 3 Sonnet"
-    )
+    assert any(
+        name.startswith("Eu Anthropic Claude Sonnet 4") for name in cached_models.keys()
+    ), "gli inference profile Bedrock non seedati devono restare separati con un nome proprio"
 
-    config = selected_llm().model_dump()
-    assert selected_llm._pyclass is not None
-    runtime_llm = selected_llm.get_llm_from_config(config)
-
-    assert isinstance(runtime_llm, _FakeChatBedrock)
-    assert runtime_llm.kwargs["model_id"].endswith(
-        "anthropic.claude-3-sonnet-20240229-v1:0"
-    )
-    assert runtime_llm.kwargs["provider"] == "anthropic"
-    assert runtime_llm.kwargs["streaming"] is True
-    assert runtime_llm.kwargs["model_kwargs"] == {}
-
-    overridden_config = dict(config)
-    overridden_config["model_id"] = (
-        "arn:aws:bedrock:eu-west-1:992382436155:inference-profile/"
-        "eu.amazon.nova-2-lite-v1:0"
-    )
-    overridden_config["model_kwargs"] = '{"temperature": 0.5}'
-    overridden_runtime_llm = selected_llm.get_llm_from_config(overridden_config)
-
-    assert isinstance(overridden_runtime_llm, _FakeChatBedrockConverse)
-    assert overridden_runtime_llm.kwargs["model_id"].endswith(
-        "eu.amazon.nova-2-lite-v1:0"
-    )
-    assert overridden_runtime_llm.kwargs["provider"] == "amazon"
-    assert overridden_runtime_llm.kwargs["temperature"] == 0.5
-    assert "model_kwargs" not in overridden_runtime_llm.kwargs
-
-    print("Bedrock LLM instantiation: OK")
+    print("Bedrock cached model disambiguation: OK")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

@@ -7,7 +7,7 @@ from threading import Lock
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from enum import Enum
-from typing import Any, ClassVar, List, Optional, Type, cast
+from typing import Any, List, Optional, Type, cast
 from cat.db import crud
 
 from pydantic import BaseModel, model_validator, Field, create_model, ConfigDict
@@ -160,6 +160,10 @@ SEEDED_MODEL_CATALOG: dict[str, dict[str, str]] = {
     },
 }
 
+SEEDED_MODEL_IDS_TO_NAMES: dict[str, str] = {
+    entry["model_id"]: name for name, entry in SEEDED_MODEL_CATALOG.items()
+}
+
 
 def _get_bedrock_client():
     global client
@@ -297,6 +301,153 @@ def _humanize_model_id(model_id: str) -> str:
     return " ".join(token.upper() if token.isdigit() or any(char.isdigit() for char in token) else token.title() for token in tokens)
 
 
+def _is_inference_profile_model(model_arn: str) -> bool:
+    return ":inference-profile/" in model_arn
+
+
+def _resolve_cached_model_display_name(
+    model_arn: str, model_id: str, model_names: list[str]
+) -> str:
+    seeded_name = SEEDED_MODEL_IDS_TO_NAMES.get(model_id)
+    if seeded_name:
+        return seeded_name
+
+    if _is_inference_profile_model(model_arn):
+        humanized_name = _humanize_model_id(model_id)
+        logger.warning(
+            "Keeping cached Bedrock inference profile %s separate from seeded foundation models as '%s' to avoid name collisions during Cheshire Cat selection.",
+            model_id,
+            humanized_name,
+        )
+        return humanized_name
+
+    model_name = parse_pricing_with_model(model_names, model_id, object()) if model_names else "Error"
+    if model_name == "Error":
+        return _humanize_model_id(model_id)
+
+    return model_name
+
+
+def _get_primary_llm_info(llm_info: list[dict[str, Any]]) -> dict[str, Any]:
+    def _priority(item: dict[str, Any]) -> tuple[int, int, str]:
+        model_arn = str(item.get("model_arn", ""))
+        model_id = str(item.get("model_id", ""))
+        return (
+            1 if _is_inference_profile_model(model_arn) else 0,
+            0 if model_id in SEEDED_MODEL_IDS_TO_NAMES else 1,
+            model_id,
+        )
+
+    return min(llm_info, key=_priority)
+
+
+def _is_channel_account_model_access_error(error: Exception) -> bool:
+    message = str(error)
+    return (
+        "Access to this model is not available for channel program accounts" in message
+        and "ValidationException" in message
+    )
+
+
+def _normalize_runtime_model_identifier(value: Any, fallback: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return fallback
+
+
+def _infer_provider_name_from_model_identifier(model_identifier: str) -> str | None:
+    normalized_identifier = model_identifier.strip().split("/")[-1].lower()
+    if not normalized_identifier:
+        return None
+
+    tokens = [token for token in normalized_identifier.split(".") if token]
+    if not tokens:
+        return None
+
+    region_prefixes = {"us", "eu", "ap", "apac", "sa", "me", "ca", "af", "global"}
+    while len(tokens) > 1 and tokens[0] in region_prefixes:
+        tokens = tokens[1:]
+
+    return tokens[0] if tokens else None
+
+
+def _normalize_runtime_provider_name(configured_provider: Any, model_identifier: str, fallback: str) -> str:
+    inferred_provider = _infer_provider_name_from_model_identifier(model_identifier)
+    if inferred_provider:
+        return inferred_provider
+
+    if isinstance(configured_provider, str) and configured_provider.strip():
+        return configured_provider.strip().lower()
+
+    return fallback
+
+
+def _normalize_model_kwargs(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+
+    if value in (None, ""):
+        return {}
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in model_kwargs: {e}") from e
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        raise ValueError("model_kwargs must decode to a JSON object.")
+
+    raise ValueError("model_kwargs must be a JSON object or JSON string.")
+
+
+def _should_use_bedrock_converse(model_identifier: str, provider_name: str) -> bool:
+    normalized_identifier = model_identifier.lower()
+    normalized_provider = provider_name.lower()
+    return normalized_provider == "amazon" and ".nova" in normalized_identifier
+
+
+def _build_converse_input_kwargs(
+    configured_model_id: str,
+    configured_provider: str,
+    model_kwargs: dict[str, Any],
+    guardrails: dict[str, Any] | None,
+) -> dict[str, Any]:
+    input_kwargs: dict[str, Any] = {
+        "model_id": configured_model_id,
+        "provider": configured_provider,
+        "client": _get_bedrock_runtime_client(),
+    }
+
+    direct_param_map = {
+        "max_tokens": "max_tokens",
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+    }
+
+    additional_model_request_fields = dict(model_kwargs)
+    for source_key, target_key in direct_param_map.items():
+        if source_key in additional_model_request_fields:
+            input_kwargs[target_key] = additional_model_request_fields.pop(source_key)
+
+    stop_sequences = additional_model_request_fields.pop("stop_sequences", None)
+    if stop_sequences is None:
+        stop_sequences = additional_model_request_fields.pop("stop", None)
+    if stop_sequences is not None:
+        input_kwargs["stop_sequences"] = stop_sequences
+
+    if additional_model_request_fields:
+        input_kwargs["additional_model_request_fields"] = additional_model_request_fields
+
+    if guardrails is not None:
+        input_kwargs["guardrails"] = guardrails
+
+    return input_kwargs
+
+
 def get_cached_available_models() -> dict[str, list[dict[str, Any]]]:
     if not os.path.exists(CACHED_PRICING_FILE):
         return {}
@@ -315,9 +466,7 @@ def get_cached_available_models() -> dict[str, list[dict[str, Any]]]:
         model_id = model_arn.split("/")[-1]
         provider_key = model_id.split(".")[0].lower()
         provider_name = "mistral" if "mistral" in provider_key else provider_key
-        model_name = parse_pricing_with_model(model_names, model_id, object()) if model_names else "Error"
-        if model_name == "Error":
-            model_name = _humanize_model_id(model_id)
+        model_name = _resolve_cached_model_display_name(model_arn, model_id, model_names)
 
         pricing_info = cached_entry.get("data") or {model_id: {"input": {}, "output": {}, "cache_read_input": {}}}
 
@@ -641,18 +790,26 @@ def get_class_name(name):
 
 
 def create_custom_bedrock_class(class_name, llm_info):
-    runtime_model_arn = llm_info[0]["model_arn"]
-    runtime_provider_name = llm_info[0]["provider_name"].lower()
-    runtime_streaming_supported = llm_info[0]["response_streaming_supported"]
+    primary_llm_info = _get_primary_llm_info(llm_info)
+    runtime_model_arn = primary_llm_info["model_arn"]
+    runtime_provider_name = primary_llm_info["provider_name"].lower()
+    runtime_streaming_supported = primary_llm_info["response_streaming_supported"]
 
-    class CustomBedrockLLM:
+    class CustomBedrockLLMProxy:
+        _runtime_classes: dict[str, Any] = {}
+
         @classmethod
-        def default(cls, **kwargs):
-            from langchain_aws import BedrockLLM, ChatBedrock
+        def _get_runtime_class(cls, use_converse_api: bool, provider_name: str):
+            runtime_class_key = f"{'converse' if use_converse_api else 'legacy'}:{provider_name}"
+            if runtime_class_key in cls._runtime_classes:
+                return cls._runtime_classes[runtime_class_key]
 
-            RuntimeBaseClass = (
-                BedrockLLM if runtime_provider_name in ("cohere",) else ChatBedrock
-            )
+            from langchain_aws import BedrockLLM, ChatBedrock, ChatBedrockConverse
+
+            if use_converse_api:
+                RuntimeBaseClass = ChatBedrockConverse
+            else:
+                RuntimeBaseClass = BedrockLLM if provider_name in ("cohere",) else ChatBedrock
 
             class RuntimeCustomBedrockLLM(RuntimeBaseClass):
                 @staticmethod
@@ -667,19 +824,32 @@ def create_custom_bedrock_class(class_name, llm_info):
                     return bool(value)
 
                 def __init__(self, **runtime_kwargs):
-                    input_kwargs = {
-                        "model_id": runtime_model_arn,
-                        "provider": runtime_provider_name,
-                        "streaming": runtime_streaming_supported,
-                        "model_kwargs": json.loads(runtime_kwargs.get("model_kwargs", "{}")),
-                        "client": _get_bedrock_runtime_client(),
-                    }
+                    configured_model_id = _normalize_runtime_model_identifier(
+                        runtime_kwargs.get("model_id"), runtime_model_arn
+                    )
+                    configured_provider = _normalize_runtime_provider_name(
+                        runtime_kwargs.get("provider"),
+                        configured_model_id,
+                        runtime_provider_name,
+                    )
+
+                    if configured_model_id != runtime_model_arn:
+                        logger.info(
+                            "Amazon Bedrock runtime override for %s: using configured model_id %s instead of default %s.",
+                            class_name,
+                            configured_model_id,
+                            runtime_model_arn,
+                        )
+
+                    model_kwargs = _normalize_model_kwargs(runtime_kwargs.get("model_kwargs", "{}"))
+                    object.__setattr__(self, "_configured_model_id", configured_model_id)
                     guardrail = self._normalize_enum_value(runtime_kwargs.get("guardrail_id", "None"))
+                    guardrails = None
                     if guardrail != "None":
                         parts = str(guardrail).split(":")
                         if len(parts) == 4:
                             _, _, guardrail_id, version = parts
-                            input_kwargs["guardrails"] = {
+                            guardrails = {
                                 "guardrailIdentifier": guardrail_id,
                                 "guardrailVersion": version.replace("v", ""),
                                 "trace": self._normalize_bool(runtime_kwargs.get("guardrail_trace", False)),
@@ -690,6 +860,24 @@ def create_custom_bedrock_class(class_name, llm_info):
                                 class_name,
                                 guardrail,
                             )
+
+                    if use_converse_api:
+                        input_kwargs = _build_converse_input_kwargs(
+                            configured_model_id,
+                            configured_provider,
+                            model_kwargs,
+                            guardrails,
+                        )
+                    else:
+                        input_kwargs = {
+                            "model_id": configured_model_id,
+                            "provider": configured_provider,
+                            "streaming": runtime_streaming_supported,
+                            "model_kwargs": model_kwargs,
+                            "client": _get_bedrock_runtime_client(),
+                        }
+                        if guardrails is not None:
+                            input_kwargs["guardrails"] = guardrails
 
                     input_kwargs = {
                         key: value for key, value in input_kwargs.items() if value is not None
@@ -706,12 +894,10 @@ def create_custom_bedrock_class(class_name, llm_info):
                         def parse_float(value, default=0.0):
                             if isinstance(value, (int, float)):
                                 return float(value)
-                            return (
-                                float(value) if value.replace(".", "", 1).isdigit() else default
-                            )
+                            return float(value) if value.replace(".", "", 1).isdigit() else default
 
                         setattr(
-                            RuntimeCustomBedrockLLM,
+                            type(self),
                             "_budget_config",
                             {
                                 "budget_limit": parse_float(budget_limit),
@@ -753,10 +939,7 @@ def create_custom_bedrock_class(class_name, llm_info):
                         )
                         logger.warning(alert_message)
 
-                    if (
-                        budget_mode == BudgetMode.BLOCK.value
-                        and model_total_cost > budget_limit
-                    ):
+                    if budget_mode == BudgetMode.BLOCK.value and model_total_cost > budget_limit:
                         return AIMessage(
                             content="⛔ **Invocation Blocked Due to Budget Constraints.**\n"
                             "Your request cannot be processed because the total cost has exceeded the budget limit.\n"
@@ -782,7 +965,25 @@ def create_custom_bedrock_class(class_name, llm_info):
                             )
                         kwargs["input"] = normalized_input
 
-                    response = super().invoke(*args, **kwargs)
+                    try:
+                        response = super().invoke(*args, **kwargs)
+                    except ValueError as e:
+                        if _is_channel_account_model_access_error(e):
+                            blocked_model_id = getattr(self, "_configured_model_id", runtime_model_arn)
+                            logger.warning(
+                                "Amazon Bedrock model %s is not available for this AWS channel program account. Returning a user-facing explanation instead of crashing Cheshire Cat.",
+                                blocked_model_id,
+                            )
+                            return AIMessage(
+                                content=(
+                                    "⛔ **This Amazon Bedrock model is not available for your AWS account.**\n"
+                                    f"Model: `{blocked_model_id}`\n"
+                                    "AWS returned a channel-program entitlement restriction for this model. "
+                                    "Please select a different Bedrock model that is enabled for your account, "
+                                    "or contact your AWS Solution Provider / Distributor."
+                                )
+                            )
+                        raise
 
                     try:
                         usage_metadata = response.usage_metadata
@@ -822,15 +1023,35 @@ def create_custom_bedrock_class(class_name, llm_info):
                     return response
 
             RuntimeCustomBedrockLLM.__name__ = class_name
-            return RuntimeCustomBedrockLLM(**kwargs)
+            RuntimeCustomBedrockLLM.__qualname__ = class_name
+            cls._runtime_classes[runtime_class_key] = RuntimeCustomBedrockLLM
+            return cls._runtime_classes[runtime_class_key]
 
-    CustomBedrockLLM.__name__ = class_name
-    return CustomBedrockLLM
+        def __new__(cls, **runtime_kwargs):
+            configured_model_id = _normalize_runtime_model_identifier(
+                runtime_kwargs.get("model_id"), runtime_model_arn
+            )
+            configured_provider = _normalize_runtime_provider_name(
+                runtime_kwargs.get("provider"),
+                configured_model_id,
+                runtime_provider_name,
+            )
+            use_converse_api = _should_use_bedrock_converse(
+                configured_model_id, configured_provider
+            )
+            return cls._get_runtime_class(use_converse_api, configured_provider)(
+                **runtime_kwargs
+            )
+
+    CustomBedrockLLMProxy.__name__ = class_name
+    CustomBedrockLLMProxy.__qualname__ = class_name
+    return CustomBedrockLLMProxy
 
 
 def get_model_price(llm_info):
-    model_id = llm_info[0]["model_id"]
-    pricing_info = llm_info[0].get("pricing_info", {})
+    primary_llm_info = _get_primary_llm_info(llm_info)
+    model_id = primary_llm_info["model_id"]
+    pricing_info = primary_llm_info.get("pricing_info", {})
 
     if isinstance(pricing_info, str):
         try:
@@ -871,6 +1092,7 @@ def get_amazon_bedrock_llm_configs(
 
     for model_name, llm_info in amazon_llms.items():
         class_name = get_class_name(model_name)
+        primary_llm_info = _get_primary_llm_info(llm_info)
         custom_bedrock_class = create_custom_bedrock_class(class_name, llm_info)
 
         input_token_price, output_token_price = get_model_price(llm_info)
@@ -900,11 +1122,11 @@ def get_amazon_bedrock_llm_configs(
 
         class AmazonBedrockLLMConfig(LLMSettings):
             model_id: str = Field(
-                default=llm_info[0]["model_arn"],
+                default=primary_llm_info["model_arn"],
                 description="The Amazon Resource Name (ARN) of the model.",
             )
             provider: str = Field(
-                default=llm_info[0]["provider_name"],
+                default=primary_llm_info["provider_name"],
                 description="The name of the provider of the model.",
             )
             model_kwargs: Optional[str] = Field(
@@ -951,7 +1173,7 @@ def get_amazon_bedrock_llm_configs(
                 default="",
                 description="The maximum budget for the model.",
             )
-            _pyclass: ClassVar[Type[Any]] = custom_bedrock_class
+            _pyclass: Type[Any] = custom_bedrock_class
             model_config = ConfigDict(
                 json_schema_extra={
                     "humanReadableName": f"Amazon Bedrock: {model_name}",
@@ -1057,6 +1279,14 @@ def get_settings() -> type[BaseModel]:
             global _current_llms
             _current_llms = []
             for llm in values.keys():
+                if llm not in config_llms:
+                    if values.get(llm) not in (None, "", False):
+                        logger.info(
+                            "Ignoring unknown Amazon Bedrock plugin preference key '%s'; only discovered model names are used for selection.",
+                            llm,
+                        )
+                    continue
+
                 if llm in values and values[llm]:
                     _current_llms.append(config_llms[llm])
             log.info("Dynamically Selected LLMs:")
