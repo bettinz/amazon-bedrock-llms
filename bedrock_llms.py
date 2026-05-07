@@ -285,9 +285,13 @@ def get_availale_models(client):
 
         model_id = model["modelId"]
         pricing_info = get_or_update_pricing(model_id, model_arn, pricing_data, model_names)
-
         if "error" in pricing_info:
-            continue
+            logger.warning(
+                "Pricing unavailable for %s (%s). Registering the model anyway with empty pricing metadata.",
+                modelName,
+                model_id,
+            )
+            pricing_info = {model_id: {"input": {}, "output": {}, "cache_read_input": {}}}
 
         if response_streaming_supported:
             models[modelName].append(
