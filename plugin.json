@@ -1,10 +1,10 @@
 {
-    "name": "Amazon Bedrock LLM",
-    "version": "1.1.0",
-    "description": "AWS Bedrock LLM plugin for Cheshire Cat AI - supports Amazon Nova (Pro, Lite, Nova 2 Lite) and Anthropic Claude (Sonnet 4.6, Haiku 4.5, Opus 4.6) models.",
-    "author_name": "bettinz",
-    "author_url": "https://github.com/bettinz",
-    "plugin_url": "https://github.com/bettinz/amazon-bedrock-llms.git",
-    "tags": "AWS, Bedrock, Nova Pro, Nova Lite, Nova 2, Claude, Sonnet, Haiku, Opus, LLM, Cheshire Cat AI",
-    "thumb": "https://raw.githubusercontent.com/bettinz/amazon-bedrock-llms/master/assets/logo2.png"
+    "name": "Amazon Bedrock LLMs",
+    "version": "2.1.5",
+    "description": "This plugin integrates Amazon Bedrock's text llms capabilities.",
+    "author_name": "Gianluigi Mucciolo",
+    "author_url": "https://www.linkedin.com/in/ggiallo28/",
+    "plugin_url": "https://github.com/ggiallo28/amazon-bedrock-llms.git",
+    "tags": "AWS, Bedrock, llms, integration",
+    "thumb": "https://raw.githubusercontent.com/ggiallo28/amazon-bedrock-llms/master/assets/logo2.png"
 }
