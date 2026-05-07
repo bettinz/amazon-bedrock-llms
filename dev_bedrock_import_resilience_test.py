@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -29,14 +30,20 @@ class _FakeMadHatter:
         self.plugins = plugins
 
 
-class _FakeBoto3:
+class _FakeBoto3Session:
     calls: list[str] = []
 
-    def get_client(self, service_name: str):
-        self.calls.append(service_name)
+    def client(self, service_name: str, **kwargs):
+        type(self).calls.append(service_name)
         if service_name == "bedrock":
             return _FailingBedrockClient()
         return types.SimpleNamespace(meta=types.SimpleNamespace(region_name="eu-west-1"))
+
+
+class _FakeBoto3Module:
+    @staticmethod
+    def Session(**kwargs):
+        return _FakeBoto3Session()
 
 
 class _FailingBedrockClient:
@@ -100,6 +107,10 @@ class _FakeLLMSettings(BaseModel):
     pass
 
 
+class _FakeCoreLLMConfig(BaseModel):
+    pass
+
+
 def _identity_decorator(*args, **kwargs):
     if args and callable(args[0]) and len(args) == 1 and not kwargs:
         return args[0]
@@ -123,6 +134,7 @@ def _install_stubs() -> _FakePlugins:
     _install_module("cat")
     _install_module("cat.db", crud=_FakeCrudModule)
     _install_module("cat.log", log=_FakeLogger())
+    _install_module("cat.factory")
     _install_module(
         "cat.mad_hatter.decorators",
         tool=_identity_decorator,
@@ -133,10 +145,12 @@ def _install_stubs() -> _FakePlugins:
         "cat.mad_hatter.mad_hatter",
         MadHatter=lambda: _FakeMadHatter(fake_plugins),
     )
-    _install_module("cat.factory.llm", LLMSettings=_FakeLLMSettings)
-    _install_module("cat.plugins.aws_integration", Boto3=_FakeBoto3)
-
-    _install_module("langchain_aws", BedrockLLM=_FakeLangchainModel, ChatBedrock=_FakeLangchainModel)
+    _install_module(
+        "cat.factory.llm",
+        LLMSettings=_FakeLLMSettings,
+        get_allowed_language_models=lambda: [_FakeCoreLLMConfig],
+    )
+    _install_module("boto3", Session=_FakeBoto3Module.Session)
     _install_module(
         "langchain_core.messages",
         AIMessage=_FakeAIMessage,
@@ -185,23 +199,47 @@ def main() -> int:
     fake_plugins = _install_stubs()
     module = _load_module()
 
-    assert _FakeBoto3.calls == [], "l'import del plugin non deve inizializzare client AWS"
+    assert _FakeBoto3Session.calls == [], "l'import del plugin non deve inizializzare client AWS"
     assert fake_plugins.calls == [], "l'import del plugin non deve dipendere dal registry dei plugin"
+    assert "cat.plugins.aws_integration" not in sys.modules, "il test deve simulare l'assenza del plugin aws_integration nel core"
+    assert "langchain_aws" not in sys.modules, "il test deve simulare l'assenza di langchain_aws durante il bootstrap delle settings"
 
     loaded_settings = module._load_plugin_settings()
     assert loaded_settings == {"Anthropic Claude 3 Sonnet": True}
     assert "amazon-bedrock-llms" in fake_plugins.calls, "deve cercare anche il nome plugin con trattini"
-    assert _FakeBoto3.calls == [], "caricare le settings del plugin non deve toccare AWS"
+    assert _FakeBoto3Session.calls == [], "caricare le settings del plugin non deve toccare AWS"
+
+    patched_llms = sys.modules["cat.factory.llm"].get_allowed_language_models()
+    assert any(llm.__name__ == "_FakeCoreLLMConfig" for llm in patched_llms)
+    assert any(
+        getattr(llm, "model_config", {}).get("json_schema_extra", {}).get("humanReadableName") == "Amazon Bedrock: Anthropic Claude 3 Sonnet"
+        for llm in patched_llms
+    ), "la patch della llm factory deve aggiungere i modelli Bedrock anche senza hook discovery"
 
     cached_models = module.get_cached_available_models()
     assert "Anthropic Claude 3 Sonnet" in cached_models, "il catalogo cached deve preservare i modelli Bedrock"
+
+    original_cached_pricing = module.CACHED_PRICING_FILE
+    module.CACHED_PRICING_FILE = str(SOURCE_PATH.with_name("missing_cached_model_pricing.json"))
+    try:
+        seed_models = module.get_seed_available_models()
+        assert "Anthropic Claude 3 Sonnet" in seed_models, "il catalogo seed deve preservare i modelli Bedrock noti"
+
+        SeedSettingsModel = module.get_settings()
+        seed_defaults = SeedSettingsModel().model_dump()
+        assert seed_defaults, "la settings model non deve svuotarsi quando manca anche il cache file"
+        assert "Anthropic Claude 3 Sonnet" in seed_defaults
+    finally:
+        module.CACHED_PRICING_FILE = original_cached_pricing
+        if os.path.exists(str(SOURCE_PATH.with_name("missing_cached_model_pricing.json"))):
+            os.remove(str(SOURCE_PATH.with_name("missing_cached_model_pricing.json")))
 
     SettingsModel = module.get_settings()
     defaults = SettingsModel().model_dump()
     assert defaults, "la settings model non deve essere vuota quando la discovery live fallisce"
     assert "Anthropic Claude 3 Sonnet" in defaults
     assert any(defaults.values()), "almeno un modello Bedrock deve restare selezionabile di default"
-    assert _FakeBoto3.calls.count("bedrock") == 1, "il client bedrock deve essere lazy e cache-ato"
+    assert _FakeBoto3Session.calls.count("bedrock") == 1, "il client bedrock deve essere lazy e cache-ato"
 
     allowed_llms = module.factory_pipeline()
     assert allowed_llms, "factory_pipeline deve restituire almeno un LLM dalla cache quando bootstrap live fallisce"
@@ -216,5 +254,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

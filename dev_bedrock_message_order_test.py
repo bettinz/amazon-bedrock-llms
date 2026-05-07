@@ -3,11 +3,30 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.prompt_values import ChatPromptValue
-
 SOURCE_PATH = Path(__file__).with_name("bedrock_llms.py")
 TARGET_FUNCTIONS = {"_normalize_bedrock_messages", "_normalize_bedrock_input"}
+
+
+class BaseMessage:
+    def __init__(self, content=None, **kwargs):
+        self.content = content
+
+
+class AIMessage(BaseMessage):
+    pass
+
+
+class HumanMessage(BaseMessage):
+    pass
+
+
+class SystemMessage(BaseMessage):
+    pass
+
+
+class ChatPromptValue:
+    def __init__(self, messages):
+        self.messages = messages
 
 
 def _load_normalizers():

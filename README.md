@@ -40,6 +40,25 @@ The plugin provides a dynamic settings model that allows users to:
 4. The plugin will automatically integrate the selected Bedrock models into your AI pipeline.
 5. Monitor Costs: Enable cost monitoring to keep track of the costs associated with the models.
 
+## Important Cheshire Cat installation note
+
+Cheshire Cat imports plugin Python modules from the plugin folder path. Because of that, the plugin folder name must be import-safe.
+
+- If you install from a ZIP package, use a package whose root folder is named `amazon_bedrock_llms`.
+- If you copy the plugin manually into `cat/plugins`, rename the folder to `amazon_bedrock_llms` before starting Cheshire Cat.
+
+This repository includes a packaging helper that builds a compatible ZIP archive:
+
+```python
+python build_plugin_package.py
+```
+
+It creates:
+
+- `dist/amazon_bedrock_llms.zip`
+
+Using that archive avoids plugin discovery issues caused by hyphenated folder names.
+
 For detailed configuration options and advanced usage, please refer to the plugin settings in the Cheshire Cat AI interface.
 
 ## Note

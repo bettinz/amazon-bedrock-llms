@@ -7,21 +7,80 @@ from threading import Lock
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from enum import Enum
-from typing import Any, List, Optional, Type, cast
+from typing import Any, ClassVar, List, Optional, Type, cast
 from cat.db import crud
 
 from pydantic import BaseModel, model_validator, Field, create_model, ConfigDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompt_values import ChatPromptValue
-
-from langchain_aws import BedrockLLM, ChatBedrock
 import logging
 
 from cat.log import log
 from cat.mad_hatter.decorators import tool, hook, plugin
 from cat.mad_hatter.mad_hatter import MadHatter
 from cat.factory.llm import LLMSettings
-from cat.plugins.aws_integration import Boto3
+import cat.factory.llm as cat_llm_factory
+
+try:
+    from cat.plugins.aws_integration import Boto3 as _CatPluginBoto3
+except ImportError:
+    _CatPluginBoto3 = None
+
+if _CatPluginBoto3 is None:
+    import boto3
+
+    class Boto3:
+        _session = None
+        _clients: dict[tuple[str, str | None], Any] = {}
+
+        @classmethod
+        def _get_region_name(cls, service_name: str) -> str | None:
+            if service_name == "pricing":
+                return (
+                    os.getenv("AWS_PRICING_REGION")
+                    or os.getenv("AWS_BEDROCK_REGION")
+                    or os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or "us-east-1"
+                )
+
+            return (
+                os.getenv("AWS_BEDROCK_REGION")
+                or os.getenv("AWS_REGION")
+                or os.getenv("AWS_DEFAULT_REGION")
+            )
+
+        @classmethod
+        def _get_session(cls):
+            if cls._session is None:
+                session_kwargs = {}
+                profile_name = os.getenv("AWS_PROFILE")
+                default_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+
+                if profile_name:
+                    session_kwargs["profile_name"] = profile_name
+                if default_region:
+                    session_kwargs["region_name"] = default_region
+
+                cls._session = boto3.Session(**session_kwargs)
+
+            return cls._session
+
+        def get_client(self, service_name: str):
+            region_name = self._get_region_name(service_name)
+            cache_key = (service_name, region_name)
+
+            if cache_key not in self._clients:
+                client_kwargs = {}
+                if region_name:
+                    client_kwargs["region_name"] = region_name
+                self._clients[cache_key] = self._get_session().client(
+                    service_name, **client_kwargs
+                )
+
+            return self._clients[cache_key]
+else:
+    Boto3 = _CatPluginBoto3
 
 try:
     from .bedrock_price_estimator import (
@@ -44,6 +103,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+logger.info("Amazon Bedrock LLM plugin module imported.")
 
 PLUGIN_NAME = "amazon_bedrock_llms"
 DEFAULT_MODEL = "amazon.titan-tg1-large"
@@ -61,6 +121,44 @@ _pricing_catalog_cache: dict[str, Any] = {"data": [], "model_names": [], "timest
 _pricing_cache_dirty = False
 _current_model_cost_cache = None
 _cost_cache_lock = Lock()
+
+SEEDED_MODEL_CATALOG: dict[str, dict[str, str]] = {
+    "Anthropic Claude 3 Sonnet": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+        "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+        "provider_name": "anthropic",
+    },
+    "Amazon Titan Text G1 - Lite": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-text-lite-v1",
+        "model_id": "amazon.titan-text-lite-v1",
+        "provider_name": "amazon",
+    },
+    "Amazon Titan Text G1 - Express": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-text-express-v1",
+        "model_id": "amazon.titan-text-express-v1",
+        "provider_name": "amazon",
+    },
+    "Anthropic Claude 3 Haiku": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+        "model_id": "anthropic.claude-3-haiku-20240307-v1:0",
+        "provider_name": "anthropic",
+    },
+    "Mistral AI Mistral 7B Instruct": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/mistral.mistral-7b-instruct-v0:2",
+        "model_id": "mistral.mistral-7b-instruct-v0:2",
+        "provider_name": "mistral",
+    },
+    "Mistral AI Mixtral 8x7B Instruct": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/mistral.mixtral-8x7b-instruct-v0:1",
+        "model_id": "mistral.mixtral-8x7b-instruct-v0:1",
+        "provider_name": "mistral",
+    },
+    "Mistral AI Mistral Large (24,02)": {
+        "model_arn": "arn:aws:bedrock:eu-west-1::foundation-model/mistral.mistral-large-2402-v1:0",
+        "model_id": "mistral.mistral-large-2402-v1:0",
+        "provider_name": "mistral",
+    },
+}
 
 
 def _get_bedrock_client():
@@ -126,6 +224,59 @@ def _load_plugin_settings() -> dict[str, Any]:
         return {}
 
 
+def _merge_llm_config_classes(base_llms: list[type], extra_llms: list[type]) -> list[type]:
+    merged_llms = list(base_llms)
+    existing_names = {llm.__name__ for llm in merged_llms}
+
+    for llm in extra_llms:
+        if llm.__name__ not in existing_names:
+            merged_llms.append(llm)
+            existing_names.add(llm.__name__)
+
+    return merged_llms
+
+
+def _get_bedrock_llm_configs_for_factory() -> list[type]:
+    try:
+        return factory_pipeline()
+    except Exception as e:
+        logger.warning(
+            "Amazon Bedrock fallback LLM factory patch could not build model configs: %s",
+            e,
+        )
+        return []
+
+
+def _ensure_llm_factory_patch() -> None:
+    original_get_allowed_language_models = getattr(
+        cat_llm_factory, "_amazon_bedrock_original_get_allowed_language_models", None
+    )
+
+    if original_get_allowed_language_models is None:
+        original_get_allowed_language_models = cat_llm_factory.get_allowed_language_models
+        cat_llm_factory._amazon_bedrock_original_get_allowed_language_models = (
+            original_get_allowed_language_models
+        )
+
+    if getattr(cat_llm_factory, "_amazon_bedrock_patch_installed", False):
+        return
+
+    def _patched_get_allowed_language_models():
+        base_llms = original_get_allowed_language_models()
+        bedrock_llms = _get_bedrock_llm_configs_for_factory()
+        merged_llms = _merge_llm_config_classes(base_llms, bedrock_llms)
+        logger.info(
+            "Amazon Bedrock LLM factory patch returning %s total Cheshire Cat LLM configuration(s), including %s Bedrock configuration(s).",
+            len(merged_llms),
+            len(bedrock_llms),
+        )
+        return merged_llms
+
+    cat_llm_factory.get_allowed_language_models = _patched_get_allowed_language_models
+    cat_llm_factory._amazon_bedrock_patch_installed = True
+    logger.info("Amazon Bedrock LLM factory patch installed.")
+
+
 def _load_seed_model_names() -> list[str]:
     settings_path = PLUGIN_ROOT / "settings.json"
     if not settings_path.exists():
@@ -176,6 +327,29 @@ def get_cached_available_models() -> dict[str, list[dict[str, Any]]]:
                 "provider_name": provider_name,
                 "response_streaming_supported": True,
                 "pricing_info": pricing_info,
+                "model_id": model_id,
+            }
+        )
+
+    return dict(models)
+
+
+def get_seed_available_models() -> dict[str, list[dict[str, Any]]]:
+    model_names = _load_seed_model_names()
+    models = defaultdict(list)
+
+    for model_name in model_names:
+        seeded_model = SEEDED_MODEL_CATALOG.get(model_name)
+        if seeded_model is None:
+            continue
+
+        model_id = seeded_model["model_id"]
+        models[model_name].append(
+            {
+                "model_arn": seeded_model["model_arn"],
+                "provider_name": seeded_model["provider_name"],
+                "response_streaming_supported": True,
+                "pricing_info": {model_id: {"input": {}, "output": {}, "cache_read_input": {}}},
                 "model_id": model_id,
             }
         )
@@ -467,165 +641,188 @@ def get_class_name(name):
 
 
 def create_custom_bedrock_class(class_name, llm_info):
-    current_provider = llm_info[0]["provider_name"]
-    ClassBedrock = BedrockLLM if current_provider in ("cohere") else ChatBedrock
+    runtime_model_arn = llm_info[0]["model_arn"]
+    runtime_provider_name = llm_info[0]["provider_name"].lower()
+    runtime_streaming_supported = llm_info[0]["response_streaming_supported"]
 
-    class CustomBedrockLLM(ClassBedrock):
-        def __init__(self, **kwargs):
-            input_kwargs = {
-                "model_id": llm_info[0]["model_arn"],
-                "provider": llm_info[0]["provider_name"].lower(),
-                "streaming": llm_info[0]["response_streaming_supported"],
-                "model_kwargs": json.loads(kwargs.get("model_kwargs", "{}")),
-                "client": _get_bedrock_runtime_client(),
-            }
-            guardrail = kwargs.get("guardrail_id", "None")
-            if guardrail != "None":
-                _, _, guardrail_id, version = guardrail.split(":")
-                guardrail_conf = {
-                    "guardrailIdentifier": guardrail_id,
-                    "guardrailVersion": version.replace("v", ""),
-                    "trace": bool(kwargs.get("guardrail_trace", "False")),
-                }
-                input_kwargs["guardrails"] = guardrail_conf
+    class CustomBedrockLLM:
+        @classmethod
+        def default(cls, **kwargs):
+            from langchain_aws import BedrockLLM, ChatBedrock
 
-            input_kwargs = {k: v for k, v in input_kwargs.items() if v is not None}
-            super(CustomBedrockLLM, self).__init__(**input_kwargs)
+            RuntimeBaseClass = (
+                BedrockLLM if runtime_provider_name in ("cohere",) else ChatBedrock
+            )
 
-            if kwargs.get("budget_mode", "Disabled") != "Disabled":
-                budget_limit = kwargs.get("budget_limit", "Unknown")
-                input_price = kwargs.get("input_token_price", "Unknown")
-                output_price = kwargs.get("output_token_price", "Unknown")
-                input_token_unit = kwargs.get("input_token_unit", "Unknown")
-                output_token_unit = kwargs.get("output_token_unit", "Unknown")
+            class RuntimeCustomBedrockLLM(RuntimeBaseClass):
+                @staticmethod
+                def _normalize_enum_value(value):
+                    return value.value if isinstance(value, Enum) else value
 
-                def parse_float(value, default=0.0):
-                    if isinstance(value, (int, float)):
-                        return float(value)
-                    return (
-                        float(value) if value.replace(".", "", 1).isdigit() else default
+                @classmethod
+                def _normalize_bool(cls, value) -> bool:
+                    value = cls._normalize_enum_value(value)
+                    if isinstance(value, str):
+                        return value.strip().lower() in {"1", "true", "yes", "on"}
+                    return bool(value)
+
+                def __init__(self, **runtime_kwargs):
+                    input_kwargs = {
+                        "model_id": runtime_model_arn,
+                        "provider": runtime_provider_name,
+                        "streaming": runtime_streaming_supported,
+                        "model_kwargs": json.loads(runtime_kwargs.get("model_kwargs", "{}")),
+                        "client": _get_bedrock_runtime_client(),
+                    }
+                    guardrail = self._normalize_enum_value(runtime_kwargs.get("guardrail_id", "None"))
+                    if guardrail != "None":
+                        parts = str(guardrail).split(":")
+                        if len(parts) == 4:
+                            _, _, guardrail_id, version = parts
+                            input_kwargs["guardrails"] = {
+                                "guardrailIdentifier": guardrail_id,
+                                "guardrailVersion": version.replace("v", ""),
+                                "trace": self._normalize_bool(runtime_kwargs.get("guardrail_trace", False)),
+                            }
+                        else:
+                            logger.warning(
+                                "Ignoring malformed Bedrock guardrail setting for %s: %s",
+                                class_name,
+                                guardrail,
+                            )
+
+                    input_kwargs = {
+                        key: value for key, value in input_kwargs.items() if value is not None
+                    }
+                    super().__init__(**input_kwargs)
+
+                    if runtime_kwargs.get("budget_mode", "Disabled") != "Disabled":
+                        budget_limit = runtime_kwargs.get("budget_limit", "Unknown")
+                        input_price = runtime_kwargs.get("input_token_price", "Unknown")
+                        output_price = runtime_kwargs.get("output_token_price", "Unknown")
+                        input_token_unit = runtime_kwargs.get("input_token_unit", "Unknown")
+                        output_token_unit = runtime_kwargs.get("output_token_unit", "Unknown")
+
+                        def parse_float(value, default=0.0):
+                            if isinstance(value, (int, float)):
+                                return float(value)
+                            return (
+                                float(value) if value.replace(".", "", 1).isdigit() else default
+                            )
+
+                        setattr(
+                            RuntimeCustomBedrockLLM,
+                            "_budget_config",
+                            {
+                                "budget_limit": parse_float(budget_limit),
+                                "input_token_price": parse_float(input_price)
+                                / parse_float(input_token_unit, default=1.0),
+                                "output_token_price": parse_float(output_price)
+                                / parse_float(output_token_unit, default=1.0),
+                                "budget_mode": runtime_kwargs.get("budget_mode", "Disabled"),
+                            },
+                        )
+
+                def get_current_model_cost(self):
+                    return _load_current_model_cost()
+
+                def compute_invocation_cost(self, input_tokens, output_tokens, total_tokens):
+                    budget_config = getattr(self, "_budget_config", {})
+                    input_price = budget_config.get("input_token_price", 0.0)
+                    output_price = budget_config.get("output_token_price", 0.0)
+                    current_request_cost = round(
+                        (input_price * input_tokens) + (output_price * output_tokens), 6
                     )
+                    model_total_cost = self.get_current_model_cost() + current_request_cost
+                    _store_current_model_cost(model_total_cost)
+                    return model_total_cost, current_request_cost
 
-                budget_limit = parse_float(budget_limit)
-                input_price = parse_float(input_price)
-                output_price = parse_float(output_price)
-                input_token_unit = parse_float(input_token_unit, default=1.0)
-                output_token_unit = parse_float(output_token_unit, default=1.0)
-
-                setattr(
-                    CustomBedrockLLM,
-                    "_budget_config",
-                    {
-                        "budget_limit": budget_limit,
-                        "input_token_price": input_price / input_token_unit,
-                        "output_token_price": output_price / output_token_unit,
-                        "budget_mode": kwargs.get("budget_mode", "Disabled"),
-                    },
-                )
-
-        def get_current_model_cost(self):
-            """Retrieves the total model cost from the cache file."""
-            return _load_current_model_cost()
-
-        def compute_invocation_cost(self, input_tokens, output_tokens, total_tokens):
-            """Computes cost for the current request and updates the total model cost."""
-            budget_config = getattr(self, "_budget_config", {})
-            input_price = budget_config.get("input_token_price", 0.0)
-            output_price = budget_config.get("output_token_price", 0.0)
-
-            input_cost = input_price * input_tokens
-            output_cost = output_price * output_tokens
-            current_request_cost = round(input_cost + output_cost, 6)
-
-            model_total_cost = self.get_current_model_cost() + current_request_cost
-
-            _store_current_model_cost(model_total_cost)
-
-            return model_total_cost, current_request_cost
-
-        def invoke(self, *args, **kwargs):
-            budget_config = getattr(self, "_budget_config", {})
-            budget_mode = str(
-                budget_config.get("budget_mode", BudgetMode.DISABLED)
-            ).capitalize()
-            budget_limit = float(budget_config.get("budget_limit", 0.0))
-
-            model_total_cost = self.get_current_model_cost()
-
-            alert_message = ""
-            if budget_limit > 0 and model_total_cost > budget_limit:
-                alert_message = (
-                    f"⚠️ **Budget Limit Exceeded!** Budget Limit: ${budget_limit:.6f}"
-                )
-                logger.warning(alert_message)
-
-            if (
-                budget_mode == BudgetMode.BLOCK.value
-                and model_total_cost > budget_limit
-            ):
-                return AIMessage(
-                    content="⛔ **Invocation Blocked Due to Budget Constraints.**\n"
-                    "Your request cannot be processed because the total cost has exceeded the budget limit.\n"
-                    "💰 **Cost Breakdown:**\n"
-                    f"   - 🎯 **Budget Limit:** `${budget_limit:.6f}`\n"
-                    f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
-                )
-
-            if args:
-                normalized_input, dropped_messages = _normalize_bedrock_input(args[0])
-                if dropped_messages:
-                    logger.warning(
-                        "Dropped %s leading assistant message(s) before ChatBedrock.invoke to satisfy Bedrock Converse ordering.",
-                        dropped_messages,
+                def invoke(self, *args, **kwargs):
+                    budget_config = getattr(self, "_budget_config", {})
+                    budget_mode_value = self._normalize_enum_value(
+                        budget_config.get("budget_mode", BudgetMode.DISABLED)
                     )
-                args = (normalized_input, *args[1:])
-            elif "input" in kwargs:
-                normalized_input, dropped_messages = _normalize_bedrock_input(kwargs["input"])
-                if dropped_messages:
-                    logger.warning(
-                        "Dropped %s leading assistant message(s) before ChatBedrock.invoke to satisfy Bedrock Converse ordering.",
-                        dropped_messages,
-                    )
-                kwargs["input"] = normalized_input
+                    budget_mode = str(budget_mode_value)
+                    budget_limit = float(budget_config.get("budget_limit", 0.0))
+                    model_total_cost = self.get_current_model_cost()
 
-            response = super().invoke(*args, **kwargs)
-
-            try:
-                usage_metadata = response.usage_metadata
-                model_total_cost, current_request_cost = self.compute_invocation_cost(
-                    **usage_metadata
-                )
-
-                response.usage_metadata["current_request_cost"] = round(
-                    current_request_cost, 6
-                )
-                response.usage_metadata["model_total_cost"] = round(model_total_cost, 6)
-
-                if budget_mode == BudgetMode.MONITOR.value:
-                    logger.info(f"Invocation Cost: ${current_request_cost:.6f}")
-                    logger.info(f"Total Cost (All Calls): ${model_total_cost:.6f}")
-                    if alert_message:
+                    alert_message = ""
+                    if budget_limit > 0 and model_total_cost > budget_limit:
+                        alert_message = (
+                            f"⚠️ **Budget Limit Exceeded!** Budget Limit: ${budget_limit:.6f}"
+                        )
                         logger.warning(alert_message)
 
-                if budget_mode == BudgetMode.NOTIFY.value and alert_message:
-                    response.content += f"\n\n🚨 **{alert_message}** 🚨\n"
+                    if (
+                        budget_mode == BudgetMode.BLOCK.value
+                        and model_total_cost > budget_limit
+                    ):
+                        return AIMessage(
+                            content="⛔ **Invocation Blocked Due to Budget Constraints.**\n"
+                            "Your request cannot be processed because the total cost has exceeded the budget limit.\n"
+                            "💰 **Cost Breakdown:**\n"
+                            f"   - 🎯 **Budget Limit:** `${budget_limit:.6f}`\n"
+                            f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
+                        )
 
-                if budget_mode == BudgetMode.TRACE.value:
-                    response.content += "\n\n"
-                    if alert_message:
-                        response.content += f"🚨 **{alert_message}** 🚨\n"
-                    response.content += (
-                        f"💰 **Cost Breakdown:**\n"
-                        f"   - 📝 Request Cost: `${current_request_cost:.6f}`\n"
-                        f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
-                    )
+                    if args:
+                        normalized_input, dropped_messages = _normalize_bedrock_input(args[0])
+                        if dropped_messages:
+                            logger.warning(
+                                "Dropped %s leading assistant message(s) before ChatBedrock.invoke to satisfy Bedrock Converse ordering.",
+                                dropped_messages,
+                            )
+                        args = (normalized_input, *args[1:])
+                    elif "input" in kwargs:
+                        normalized_input, dropped_messages = _normalize_bedrock_input(kwargs["input"])
+                        if dropped_messages:
+                            logger.warning(
+                                "Dropped %s leading assistant message(s) before ChatBedrock.invoke to satisfy Bedrock Converse ordering.",
+                                dropped_messages,
+                            )
+                        kwargs["input"] = normalized_input
 
-                response.usage_metadata["budget_mode"] = budget_mode
+                    response = super().invoke(*args, **kwargs)
 
-            except Exception as e:
-                logger.error(f"Error processing cost computation: {e}")
+                    try:
+                        usage_metadata = response.usage_metadata
+                        model_total_cost, current_request_cost = self.compute_invocation_cost(
+                            **usage_metadata
+                        )
+                        response.usage_metadata["current_request_cost"] = round(
+                            current_request_cost, 6
+                        )
+                        response.usage_metadata["model_total_cost"] = round(
+                            model_total_cost, 6
+                        )
 
-            return response
+                        if budget_mode == BudgetMode.MONITOR.value:
+                            logger.info(f"Invocation Cost: ${current_request_cost:.6f}")
+                            logger.info(f"Total Cost (All Calls): ${model_total_cost:.6f}")
+                            if alert_message:
+                                logger.warning(alert_message)
+
+                        if budget_mode == BudgetMode.NOTIFY.value and alert_message:
+                            response.content += f"\n\n🚨 **{alert_message}** 🚨\n"
+
+                        if budget_mode == BudgetMode.TRACE.value:
+                            response.content += "\n\n"
+                            if alert_message:
+                                response.content += f"🚨 **{alert_message}** 🚨\n"
+                            response.content += (
+                                f"💰 **Cost Breakdown:**\n"
+                                f"   - 📝 Request Cost: `${current_request_cost:.6f}`\n"
+                                f"   - 📊 Total Cost: `${model_total_cost:.6f}`"
+                            )
+
+                        response.usage_metadata["budget_mode"] = budget_mode
+                    except Exception as e:
+                        logger.error(f"Error processing cost computation: {e}")
+
+                    return response
+
+            RuntimeCustomBedrockLLM.__name__ = class_name
+            return RuntimeCustomBedrockLLM(**kwargs)
 
     CustomBedrockLLM.__name__ = class_name
     return CustomBedrockLLM
@@ -754,7 +951,7 @@ def get_amazon_bedrock_llm_configs(
                 default="",
                 description="The maximum budget for the model.",
             )
-            _pyclass: Type = custom_bedrock_class
+            _pyclass: ClassVar[Type[Any]] = custom_bedrock_class
             model_config = ConfigDict(
                 json_schema_extra={
                     "humanReadableName": f"Amazon Bedrock: {model_name}",
@@ -822,6 +1019,13 @@ def get_settings() -> type[BaseModel]:
         )
         amazon_llms = get_cached_available_models()
 
+    if not amazon_llms:
+        amazon_llms = get_seed_available_models()
+        if amazon_llms:
+            logger.warning(
+                "Bedrock live discovery and cached catalog are unavailable; falling back to the seeded model catalog to keep the plugin visible in Cheshire Cat."
+            )
+
     try:
         Guardrails = get_available_guardrails(_get_bedrock_client())
     except Exception as e:
@@ -869,6 +1073,7 @@ def get_settings() -> type[BaseModel]:
 
 @plugin
 def settings_model():
+    logger.info("Amazon Bedrock settings_model requested by Cheshire Cat.")
     return get_settings()
 
 
@@ -878,7 +1083,15 @@ def factory_pipeline():
     plugin_settings = _load_plugin_settings()
     effective_settings = {**default_settings, **plugin_settings}
     settings = cast(Any, AmazonBedrockLLMSettings)(**effective_settings)
-    return settings.get_llms()
+    llms = settings.get_llms()
+    logger.info("Registering %s Amazon Bedrock LLM configuration(s) in Cheshire Cat.", len(llms))
+    return llms
+
+
+@plugin
+def activated(plugin):
+    _ensure_llm_factory_patch()
+    logger.info("Amazon Bedrock plugin activated.")
 
 
 @hook
@@ -1047,4 +1260,14 @@ def get_current_model(data, cat):
 
 @hook
 def factory_allowed_llms(allowed, cat) -> List:
+    logger.info(
+        "Amazon Bedrock factory_allowed_llms invoked with %s existing Cheshire Cat LLM configuration(s).",
+        len(allowed),
+    )
     return allowed + factory_pipeline()
+
+
+_ensure_llm_factory_patch()
+logger.info("Amazon Bedrock LLM plugin module initialization completed.")
+
+
